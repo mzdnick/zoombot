@@ -246,10 +246,10 @@ async function handleBugSubmit(interaction: ModalSubmitInteraction) {
   const reporterId = reporterFromModalId(interaction);
 
   const input: BugReportInput = {
-    routeIdInput: interaction.fields.getTextInputValue('route_id'),
-    observed: interaction.fields.getTextInputValue('observed'),
-    expected: interaction.fields.getTextInputValue('expected'),
-    reproIntent: interaction.fields.getTextInputValue('reproducibility_intent'),
+    routeIdInput: interaction.fields.getTextInputValue('route_id').trim(),
+    observed: interaction.fields.getTextInputValue('observed').trim(),
+    expected: interaction.fields.getTextInputValue('expected').trim(),
+    reproIntent: interaction.fields.getTextInputValue('reproducibility_intent').trim(),
   };
 
   log.info({
@@ -366,9 +366,9 @@ async function processBugReport(
     .setColor(COLORS.blurple)
     .addFields(
       { name: 'By', value: `<@${reporterId}>`, inline: true },
-      { name: 'Observed Behavior', value: cleanObserved },
-      { name: 'Expected Behavior', value: cleanExpected },
-      { name: 'Reproducibility, Intent & Details', value: cleanReproIntent },
+      { name: 'Observed Behavior', value: cleanObserved || '—' },
+      { name: 'Expected Behavior', value: cleanExpected || '—' },
+      { name: 'Reproducibility, Intent & Details', value: cleanReproIntent || '—' },
     )
     .setTimestamp();
 
