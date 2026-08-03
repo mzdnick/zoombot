@@ -54,6 +54,8 @@ export function loadConfig(): BotConfig {
   const staffRole = process.env.STAFF_ROLE;
   if (!staffRole) throw new Error('STAFF_ROLE is required');
 
+  // 'n/a' is the sentinel meaning "wiki disabled" (WIKI_REPO unset); the
+  // init guard in src/handlers/events.ts checks for it before fetching.
   const wikiRepo = process.env.WIKI_REPO || 'n/a';
   const wikiCacheDir = process.env.WIKI_CACHE_DIR || 'data/wiki';
 

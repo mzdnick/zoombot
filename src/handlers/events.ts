@@ -101,7 +101,12 @@ export class BotEvents {
     ).catch(err => log.error({ err }, 'Failed to set up report button'));
 
     // Initialize wiki search
-    try {
+    // 'n/a' is the sentinel for "wiki disabled" (WIKI_REPO unset); skip the
+    // fetch rather than throwing a pointless 404 from fetchWikiPages.
+    if (config.wikiRepo === 'n/a') {
+      log.info('Wiki disabled (WIKI_REPO unset)');
+      setInitFailed();
+    } else try {
       const wikiPages = await fetchWikiPages(config.wikiRepo, config.wikiCacheDir);
       if (wikiPages.length > 0) {
         const idx = await buildIndex(wikiPages, config.wikiCacheDir);

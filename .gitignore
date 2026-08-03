@@ -11,3 +11,10 @@ data/store.sqlite-wal
 *.tsbuildinfo
 *.log
 test_*.ts
+
+# macOS
+.DS_Store
+
+# Agent tooling scratch dirs (ZCode sessions and skills, per-platform agent config)
+.zcode/
+.agents/
