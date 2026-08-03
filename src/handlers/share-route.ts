@@ -256,7 +256,7 @@ async function processShareRoute(
         new ButtonBuilder()
           .setLabel('Need help?')
           .setStyle(ButtonStyle.Link)
-          .setURL('https://wiki.firestar.link/faq/#how-do-i-upload-logs-for-troubleshooting'),
+          .setURL('https://community.sunnypilot.ai/t/share-a-route/1916'),
       );
 
       await interaction.editReply({

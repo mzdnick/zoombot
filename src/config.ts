@@ -54,10 +54,10 @@ export function loadConfig(): BotConfig {
   const staffRole = process.env.STAFF_ROLE;
   if (!staffRole) throw new Error('STAFF_ROLE is required');
 
-  const wikiRepo = process.env.WIKI_REPO || 'StarPilot-Docs/docs';
+  const wikiRepo = process.env.WIKI_REPO || 'n/a';
   const wikiCacheDir = process.env.WIKI_CACHE_DIR || 'data/wiki';
 
-  const mainRepo = process.env.MAIN_REPO || 'firestar5683/openpilot';
+  const mainRepo = process.env.MAIN_REPO || 'zoompilot/zoompilot';
 
   const openaiEndpoint = process.env.OPENAI_ENDPOINT;
   const openaiApiKey = process.env.OPENAI_API_KEY;

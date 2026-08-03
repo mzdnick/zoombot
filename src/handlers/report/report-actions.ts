@@ -164,7 +164,7 @@ const pendingAdditionalReportStore = createStore<{
   readyMsgId: string | null;
 }>('pending-additional-report', { ttl: 15 * 60 * 1000 });
 
-const LOG_HELP_URL = 'https://wiki.firestar.link/faq/#how-do-i-upload-logs-for-troubleshooting';
+const LOG_HELP_URL = 'https://community.sunnypilot.ai/t/share-a-route/1916';
 
 const CLOSING_LOCK_MSG = "This report is closing soon - it can't be reopened until then.";
 

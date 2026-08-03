@@ -345,7 +345,7 @@ async function processBugReport(
       new ButtonBuilder()
         .setLabel('Need help?')
         .setStyle(ButtonStyle.Link)
-        .setURL('https://wiki.firestar.link/faq/#how-do-i-upload-logs-for-troubleshooting'),
+        .setURL('https://community.sunnypilot.ai/t/share-a-route/1916'),
       new ButtonBuilder()
         .setCustomId(`rlogfrc_${token}`)
         .setLabel("I know what I'm doing, submit anyway")
@@ -449,7 +449,7 @@ async function handleConfirmRoute(interaction: ButtonInteraction) {
 
   if (!nowPublic) {
     await interaction.reply({
-      content: `Your route is still not public. Make sure it's accessible on [${platformName}](${routeUrl}) and try again.\n\nFollow [these instructions](<https://wiki.firestar.link/faq/#how-do-i-upload-logs-for-troubleshooting>) to make your route public.`,
+      content: `Your route is still not public. Make sure it's accessible on [${platformName}](${routeUrl}) and try again.\n\nFollow [these instructions](<https://community.sunnypilot.ai/t/share-a-route/1916>) to make your route public.`,
       flags: MessageFlags.Ephemeral,
     });
     return;

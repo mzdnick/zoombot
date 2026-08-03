@@ -4,7 +4,7 @@ import { createLogger } from './logger.js';
 
 const log = createLogger('github');
 
-const COMMIT_BRANCHES = ['StarPilot', 'Dom'] as const;
+const COMMIT_BRANCHES = ['main', 'develop'] as const;
 
 export interface CommitChoice {
   sha: string;

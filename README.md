@@ -1,6 +1,6 @@
-# StarPilot Discord Bot
+# zoompilot Discord Bot
 
-Discord bot for the StarPilot community: identity onboarding, structured bug/feedback reports, and wiki search via RAG.
+Discord bot for the zoompilot community: identity onboarding, structured bug/feedback reports, and wiki search via RAG.
 
 ## Features
 
@@ -40,3 +40,7 @@ npm run dev       # hot-reload via tsx
 npm run build
 npm start
 ```
+
+## Credits
+
+The StarPilot Discord bot originates from the [idontneedonetho/starbot](https://github.com/idontneedonetho/starbot) project. See [CREDITS.md](CREDITS.md) for author attribution.
