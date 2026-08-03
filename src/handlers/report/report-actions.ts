@@ -68,7 +68,7 @@ async function getOrCreateAssigneeTag(forum: import('discord.js').ForumChannel, 
 }
 
 function hasStaffRole(member: GuildMember): boolean {
-  return member.roles.cache.has(loadConfig().staffRole);
+  return loadConfig().staffRoles.some((id) => member.roles.cache.has(id));
 }
 
 async function applyAssignment(
@@ -1162,7 +1162,7 @@ export class BotReportActions {
 
     const member = await guild.members.fetch(target.id).catch(() => null);
     if (!member || !hasStaffRole(member)) {
-      await respond(`<@${target.id}> doesn't have the staff role and can't be assigned.`);
+      await respond(`<@${target.id}> doesn't have a staff role and can't be assigned.`);
       return;
     }
 

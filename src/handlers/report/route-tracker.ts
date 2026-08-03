@@ -316,7 +316,7 @@ async function refreshRouteLine(line: string): Promise<string> {
 }
 
 export async function handleRefreshRoutes(interaction: import('discord.js').ButtonInteraction): Promise<void> {
-  if (!(interaction.member instanceof GuildMember) || !interaction.member.roles.cache.has(loadConfig().staffRole)) {
+  if (!(interaction.member instanceof GuildMember) || !interaction.member.roles.cache.hasAny(...loadConfig().staffRoles)) {
     await interaction.reply({ content: 'Only staff can refresh route status.', flags: MessageFlags.Ephemeral });
     return;
   }

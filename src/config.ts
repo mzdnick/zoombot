@@ -12,7 +12,7 @@ export interface BotConfig {
   donateChannelId?: string;
   verifiedRole: string;
   pendingRole: string;
-  staffRole: string;
+  staffRoles: string[];
   wikiRepo: string;
   wikiCacheDir: string;
   mainRepo: string;
@@ -51,8 +51,11 @@ export function loadConfig(): BotConfig {
   const pendingRole = process.env.PENDING_ROLE;
   if (!pendingRole) throw new Error('PENDING_ROLE is required');
 
-  const staffRole = process.env.STAFF_ROLE;
-  if (!staffRole) throw new Error('STAFF_ROLE is required');
+  const staffRoles = (process.env.STAFF_ROLE ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (staffRoles.length === 0) throw new Error('STAFF_ROLE is required');
 
   const wikiRepo = process.env.WIKI_REPO || 'StarPilot-Docs/docs';
   const wikiCacheDir = process.env.WIKI_CACHE_DIR || 'data/wiki';
@@ -74,7 +77,7 @@ export function loadConfig(): BotConfig {
     donateChannelId,
     verifiedRole,
     pendingRole,
-    staffRole,
+    staffRoles,
     wikiRepo,
     wikiCacheDir,
     mainRepo,
