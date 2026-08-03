@@ -60,7 +60,7 @@ export class BotEvents {
       [
         { label: 'Set Nickname & Vehicle', customId: 'set_identity', style: ButtonStyle.Primary, emoji: '🎭' },
       ],
-      'Welcome to ***zoompilot***! To gain access to the rest of the community, please set your server nickname and register your primary vehicle.\n\nYou can click this button at any time to update your vehicle or name in the future.',
+      'Welcome to ***zoompilot*** ! To gain access to the rest of the community, please set your server nickname and register your primary vehicle.\n\nYou can click this button at any time to update your vehicle or name in the future.',
     ).catch(err => log.error({ err }, 'Failed to set up identification button'));
 
     await this.ensureButtonMessage(
