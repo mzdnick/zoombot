@@ -1,6 +1,6 @@
 # Credits
 
-The StarPilot Discord bot originates from the [idontneedonetho/starbot](https://github.com/idontneedonetho/starbot) project. This fork is built on their work.
+The StarPilot Discord bot originates from the [idontneedonetho/starbot](https://github.com/idontneedonetho/starbot) project. This fork builds on their work.
 
 ## Upstream authors
 
