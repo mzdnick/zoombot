@@ -333,6 +333,26 @@ async function processBugReport(
     return;
   }
 
+  const numberedAdditional = validatedRoutes.slice(1).map((r, i) => ({ ...r, routeNumber: i + 1 }));
+  const replacementRoutes: ExtractedRoute[] = [dedicatedValidated, ...numberedAdditional];
+  const cleanObserved = replaceRouteIds(observed, replacementRoutes, routeNumberLabel);
+  const cleanExpected = replaceRouteIds(expected, replacementRoutes, routeNumberLabel);
+  const cleanReproIntent = replaceRouteIds(reproIntent, replacementRoutes, routeNumberLabel);
+
+  // Reject before the rlog gate so a route-only field never reaches pendingStore.
+  const emptyFields = [
+    ['Observed Behavior', cleanObserved],
+    ['Expected Behavior', cleanExpected],
+    ['Reproducibility, Intent & Details', cleanReproIntent],
+  ].filter(([, value]) => !value);
+  if (emptyFields.length > 0) {
+    const names = emptyFields.map(([label]) => label).join(', ');
+    await interaction.editReply({
+      content: `Your report was not submitted.\n\nThese fields contained only a route link or blank space: **${names}**.\n\nPlease describe them in your own words, then submit again.`,
+    });
+    return;
+  }
+
   if (!force && dedicatedValidated.public && dedicatedValidated.rlogCheck && !dedicatedValidated.rlogsAvailable) {
     const token = interaction.id;
     await pendingStore.set(token, { ...input, reporterId, actingUserId: interaction.user.id });
@@ -354,13 +374,6 @@ async function processBugReport(
     await interaction.editReply({ content: rlogFailureMessage(dedicatedValidated.rlogCheck), components: [row] });
     return;
   }
-
-  const numberedAdditional = validatedRoutes.slice(1).map((r, i) => ({ ...r, routeNumber: i + 1 }));
-
-  const replacementRoutes: ExtractedRoute[] = [dedicatedValidated, ...numberedAdditional];
-  const cleanObserved = replaceRouteIds(observed, replacementRoutes, routeNumberLabel);
-  const cleanExpected = replaceRouteIds(expected, replacementRoutes, routeNumberLabel);
-  const cleanReproIntent = replaceRouteIds(reproIntent, replacementRoutes, routeNumberLabel);
 
   const reportEmbed = new EmbedBuilder()
     .setColor(COLORS.blurple)
