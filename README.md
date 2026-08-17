@@ -44,3 +44,7 @@ npm start
 ## Credits
 
 The StarPilot Discord bot originates from the [idontneedonetho/starbot](https://github.com/idontneedonetho/starbot) project. See [CREDITS.md](CREDITS.md) for author attribution.
+
+## License
+
+[MIT](LICENSE)
