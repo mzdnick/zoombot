@@ -31,8 +31,31 @@ import { randomUUID } from 'node:crypto';
 import { fetchCommitChoices, type CommitChoice } from '../../github.js';
 import { getForum, addAdditionalRoutesToTracker, createRouteTrackerThread, routeNumberLabel, TRACKER_FIELD_PREFIX } from './route-tracker.js';
 import { resolveTagIds, buildActionRow, buildDonateRow, swapForumTags } from './report-service.js';
-import { setThreadStatusEmoji, setThreadStatusAndClose, setReportCloseHandler } from './title-sync.js';
+import {
+  setThreadStatusEmoji,
+  setThreadStatusAndClose,
+  setReportCloseHandler,
+  stripLeadingEmoji,
+  withThreadLock,
+  isRateLimit,
+  retryDelay,
+  splitReportTitle,
+  composeReportTitle,
+  maxRenameLength,
+  MAX_TITLE_LEN,
+} from './title-sync.js';
 import { scheduleClose, getScheduledClose, nextCloseAt, closingNoticeField } from './close-scheduler.js';
+import {
+  scheduleSnooze,
+  getScheduledSnooze,
+  cancelSnooze,
+  reopenSnoozedThread,
+  finalizeSnoozeMessage,
+  wakesField,
+  snoozeDurationMs,
+  DEFAULT_SNOOZE,
+  SNOOZE_EMOJI,
+} from './snooze-scheduler.js';
 
 const log = createLogger('report-actions');
 
@@ -71,6 +94,15 @@ function hasStaffRole(member: GuildMember): boolean {
   return loadConfig().staffRoles.some((id) => member.roles.cache.has(id));
 }
 
+function hasScholarRole(member: GuildMember): boolean {
+  const { scholarRole } = loadConfig();
+  return scholarRole != null && member.roles.cache.has(scholarRole);
+}
+
+function canRenameThread(member: GuildMember): boolean {
+  return hasStaffRole(member) || hasScholarRole(member);
+}
+
 async function applyAssignment(
   thread: ThreadChannel,
   guild: import('discord.js').Guild,
@@ -103,15 +135,21 @@ async function applyAssignment(
   }
 }
 
-function buildStaffActionsReply(ticketId: string) {
+const RENAME_OPTION = { label: 'Rename Thread', value: 'rename', emoji: '✏️', description: "Change this report thread's title" };
+
+function buildStaffActionsReply(ticketId: string, renameOnly = false) {
   const select = new StringSelectMenuBuilder()
     .setCustomId(`staff_select_${ticketId}`)
     .setPlaceholder('Choose an action...')
     .addOptions(
-      { label: 'Assign', value: 'assign', emoji: '👤', description: 'Assign a staff member to this report' },
-      { label: 'Request User Testing', value: 'waituser', emoji: '🧪', description: 'Ask the user to test and report back' },
-      { label: 'Merge', value: 'merge', emoji: '🔀', description: 'Merge this report into another thread' },
-      { label: 'Close', value: 'close', emoji: '🔐', description: 'Close this report' },
+      ...(renameOnly ? [RENAME_OPTION] : [
+        { label: 'Assign', value: 'assign', emoji: '👤', description: 'Assign a staff member to this report' },
+        { label: 'Request User Testing', value: 'waituser', emoji: '🧪', description: 'Ask the user to test and report back' },
+        { label: 'Merge', value: 'merge', emoji: '🔀', description: 'Merge this report into another thread' },
+        RENAME_OPTION,
+        { label: 'Snooze', value: 'snooze', emoji: '😴', description: 'Temporarily close and auto-reopen later' },
+        { label: 'Close', value: 'close', emoji: '🔐', description: 'Close this report' },
+      ]),
     );
   const row = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select);
   return { content: 'Select a staff action:', components: [row], flags: MessageFlags.Ephemeral } as const;
@@ -121,6 +159,8 @@ async function closeThread(thread: ThreadChannel, guild: import('discord.js').Gu
   const config = loadConfig();
   const forum = await getForum(guild, config.forumChannelId);
   if (!forum) return;
+  // A wake timer must never reopen a thread that's being permanently closed.
+  await cancelSnooze(thread.id);
   await swapForumTags(thread, forum, { remove: ['OPEN', 'WAITING FOR DEV', 'WAITING FOR USER'], add: ['CLOSED'] });
   // No .catch: a rate-limit must propagate so title-sync can retry. Lock before
   // archive - archiving first blocks the lock edit.
@@ -167,6 +207,10 @@ const pendingAdditionalReportStore = createStore<{
 const LOG_HELP_URL = 'https://community.sunnypilot.ai/t/share-a-route/1916';
 
 const CLOSING_LOCK_MSG = "This report is closing soon - it can't be reopened until then.";
+
+function snoozeLockMsg(pendingSnooze: { wakeAt: number }): string {
+  return `This report is snoozed and will reopen <t:${Math.floor(pendingSnooze.wakeAt / 1000)}:R>. Use **Reopen Now** on the snooze notice to cancel it early.`;
+}
 
 function buildAdditionalReportModal(customId: string): ModalBuilder {
   const modal = new ModalBuilder()
@@ -348,11 +392,8 @@ async function completeReadyMessage(thread: ThreadChannel, msgId: string, note: 
 async function ensureTrackerThread(thread: ThreadChannel, guild: import('discord.js').Guild): Promise<{ url: string; threadId: string } | null> {
   const starter = await thread.fetchStarterMessage().catch(() => null);
   const embed = starter?.embeds[0];
-  const trackerUrl = embed?.fields
-    ?.find(f => f.value?.startsWith(TRACKER_FIELD_PREFIX))
-    ?.value?.match(/\]\((.+?)\)/)?.[1];
-  const trackerThreadId = trackerUrl?.split('/').pop();
-  if (trackerUrl && trackerThreadId) return { url: trackerUrl, threadId: trackerThreadId };
+  const existing = trackerRefFromStarter(starter);
+  if (existing) return existing;
 
   const tracker = await createRouteTrackerThread(guild, loadConfig(), undefined, thread.url, thread.name);
   if (tracker && starter && embed) {
@@ -438,6 +479,92 @@ function buildMergeModal(customId: string): ModalBuilder {
   return modal;
 }
 
+function buildSnoozeModal(ticketId: string): ModalBuilder {
+  const modal = new ModalBuilder()
+    .setCustomId(`snooze_modal_${ticketId}`)
+    .setTitle('Snooze Report');
+
+  const durationSelect = new StringSelectMenuBuilder()
+    .setCustomId('duration')
+    .setMinValues(1)
+    .addOptions(
+      { label: '1 day', value: '1d', default: true },
+      { label: '3 days', value: '3d' },
+      { label: '1 week', value: '1w' },
+    );
+  modal.addLabelComponents(new LabelBuilder().setLabel('Snooze duration').setStringSelectMenuComponent(durationSelect));
+
+  const reasonInput = new TextInputBuilder({
+    custom_id: 'reason',
+    style: TextInputStyle.Paragraph,
+    placeholder: 'Why is this being snoozed? (optional)',
+    required: false,
+    max_length: 1024,
+  });
+  modal.addLabelComponents(new LabelBuilder().setLabel('Reason (optional)').setTextInputComponent(reasonInput));
+
+  return modal;
+}
+
+function buildRenameModal(thread: ThreadChannel, ticketId: string): ModalBuilder {
+  const parts = splitReportTitle(thread.name, ticketId);
+  const max = maxRenameLength(parts);
+
+  const modal = new ModalBuilder()
+    .setCustomId(`rename_modal_${ticketId}`)
+    .setTitle('Rename Thread');
+
+  const titleInput = new TextInputBuilder({
+    custom_id: 'title',
+    style: TextInputStyle.Short,
+    required: true,
+    max_length: max,
+    value: parts.title.slice(0, max),
+  });
+  modal.addLabelComponents(
+    new LabelBuilder()
+      .setLabel('New title')
+      .setDescription(`Result: ${parts.prefix}…${parts.suffix}`)
+      .setTextInputComponent(titleInput),
+  );
+
+  return modal;
+}
+
+function quoteTitle(title: string): string {
+  return `\`\`\`\n${title}\n\`\`\``;
+}
+
+function trackerRefFromStarter(starter: Message | null): { url: string; threadId: string } | null {
+  const trackerUrl = starter?.embeds[0]?.fields
+    ?.find(f => f.value?.startsWith(TRACKER_FIELD_PREFIX))
+    ?.value?.match(/\]\((.+?)\)/)?.[1];
+  const trackerThreadId = trackerUrl?.split('/').pop();
+  if (!trackerUrl || !trackerThreadId) return null;
+  return { url: trackerUrl, threadId: trackerThreadId };
+}
+
+async function renameTrackerThread(
+  guild: import('discord.js').Guild,
+  trackerThreadId: string,
+  reportName: string,
+): Promise<void> {
+  const tracker = await guild.channels.fetch(trackerThreadId).catch(() => null);
+  if (!tracker?.isThread()) return;
+
+  const name = stripLeadingEmoji(reportName).trimStart().slice(0, MAX_TITLE_LEN);
+  if (tracker.name !== name) {
+    await withThreadLock(tracker.id, async () => { await tracker.setName(name); })
+      .catch(err => log.warn({ err, trackerThreadId }, 'Failed to rename route tracker thread'));
+  }
+
+  const starter = await tracker.fetchStarterMessage().catch(() => null);
+  const embed = starter?.embeds[0];
+  if (!starter || !embed || embed.title === name) return;
+  await starter.edit({ embeds: [EmbedBuilder.from(embed).setTitle(name)] })
+    .catch(err => log.warn({ err, trackerThreadId }, 'Failed to retitle route tracker embed'));
+}
+
 function ticketIdFromStarter(starter: Message | null): string | null {
   if (!starter) return null;
   const staffButton = starter.components
@@ -477,6 +604,12 @@ async function resolveStaffActionContext(interaction: MessageContextMenuCommandI
 
   if (await getScheduledClose(thread.id)) {
     await interaction.reply({ content: 'This report is closing soon - staff actions are locked until then.', flags: MessageFlags.Ephemeral });
+    return null;
+  }
+
+  const pendingSnooze = await getScheduledSnooze(thread.id);
+  if (pendingSnooze) {
+    await interaction.reply({ content: snoozeLockMsg(pendingSnooze), flags: MessageFlags.Ephemeral });
     return null;
   }
 
@@ -1054,25 +1187,30 @@ export class BotReportActions {
 
   @ButtonComponent({ id: /^staff_actions_/ })
   async staffActions(interaction: ButtonInteraction) {
-    if (!(interaction.member instanceof GuildMember) || !hasStaffRole(interaction.member)) {
-      await interaction.reply({ content: 'Only staff can use staff actions.', flags: MessageFlags.Ephemeral });
+    if (!(interaction.member instanceof GuildMember) || !canRenameThread(interaction.member)) {
+      await interaction.reply({ content: 'You do not have permission to use this action.', flags: MessageFlags.Ephemeral });
       return;
     }
 
     const ticketId = interaction.customId.replace('staff_actions_', '');
-    await interaction.reply(buildStaffActionsReply(ticketId));
+    await interaction.reply(buildStaffActionsReply(ticketId, !hasStaffRole(interaction.member)));
   }
 
   @SelectMenuComponent({ id: /^staff_select_/ })
   async staffSelect(interaction: StringSelectMenuInteraction) {
-    if (!(interaction.member instanceof GuildMember) || !hasStaffRole(interaction.member)) {
-      await interaction.reply({ content: 'Only staff can use staff actions.', flags: MessageFlags.Ephemeral });
+    if (!(interaction.member instanceof GuildMember) || !canRenameThread(interaction.member)) {
+      await interaction.reply({ content: 'You do not have permission to use this action.', flags: MessageFlags.Ephemeral });
       return;
     }
 
     const [action] = interaction.values;
-    if (!['assign', 'close', 'merge', 'waituser'].includes(action)) {
+    if (!['assign', 'close', 'merge', 'waituser', 'snooze', 'rename'].includes(action)) {
       await interaction.reply({ content: 'Invalid action.', flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    if (action !== 'rename' && !hasStaffRole(interaction.member)) {
+      await interaction.reply({ content: 'You do not have permission to use this action.', flags: MessageFlags.Ephemeral });
       return;
     }
 
@@ -1094,9 +1232,27 @@ export class BotReportActions {
       return;
     }
 
+    const pendingSnooze = await getScheduledSnooze(thread.id);
+    if (pendingSnooze) {
+      await interaction.reply({ content: snoozeLockMsg(pendingSnooze), flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    if (action === 'rename') {
+      const ticketId = interaction.customId.replace('staff_select_', '');
+      await interaction.showModal(buildRenameModal(thread, ticketId));
+      return;
+    }
+
     if (action === 'waituser') {
       const ticketId = interaction.customId.replace('staff_select_', '');
       await interaction.showModal(buildWaitUserModal(ticketId));
+      return;
+    }
+
+    if (action === 'snooze') {
+      const ticketId = interaction.customId.replace('staff_select_', '');
+      await interaction.showModal(buildSnoozeModal(ticketId));
       return;
     }
 
@@ -1169,6 +1325,93 @@ export class BotReportActions {
     if (fromMessage) await interaction.deleteReply().catch(() => {});
     await applyAssignment(thread, guild, target.id, target.username);
     await respond(`Assigned <@${target.id}> to this report.`);
+  }
+
+  @ModalComponent({ id: /^rename_modal_/ })
+  async handleRenameSubmit(interaction: ModalSubmitInteraction) {
+    if (!(interaction.member instanceof GuildMember) || !canRenameThread(interaction.member)) {
+      await interaction.reply({ content: 'You do not have permission to rename report threads.', flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    const thread = interaction.channel;
+    if (!thread?.isThread()) {
+      await interaction.reply({ content: 'This can only be used from a thread.', flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    const guild = interaction.guild;
+    if (!guild) {
+      await interaction.reply({ content: 'Could not resolve guild.', flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    if (await getScheduledClose(thread.id)) {
+      await interaction.reply({ content: 'This report is closing soon - staff actions are locked until then.', flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    const pendingSnooze = await getScheduledSnooze(thread.id);
+    if (pendingSnooze) {
+      await interaction.reply({ content: snoozeLockMsg(pendingSnooze), flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    const newTitle = interaction.fields.getTextInputValue('title').trim();
+    if (!newTitle) {
+      await interaction.reply({ content: 'The title cannot be empty.', flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    const ticketId = interaction.customId.replace('rename_modal_', '');
+
+    const fromMessage = interaction.isFromMessage();
+    if (fromMessage) {
+      await interaction.deferUpdate();
+      await interaction.deleteReply().catch(() => {});
+    } else {
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    }
+    const respond = (content: string) =>
+      fromMessage
+        ? interaction.followUp({ content, flags: MessageFlags.Ephemeral })
+        : interaction.editReply({ content });
+
+    // Compute `desired` inside the lock so a concurrent status-emoji change can't
+    // be clobbered: if the status worker renames the thread between computing the
+    // title and acquiring the lock, we'd write back a stale prefix. Recomputing
+    // from thread.name under the lock preserves whatever emoji is current.
+    let outcome: { noop: true } | { noop: false; name: string };
+    try {
+      outcome = await withThreadLock(thread.id, async () => {
+        const desired = composeReportTitle(splitReportTitle(thread.name, ticketId), newTitle);
+        if (thread.name === desired) return { noop: true as const };
+        await thread.setName(desired);
+        return { noop: false as const, name: desired };
+      });
+    } catch (err) {
+      if (isRateLimit(err)) {
+        const retryAt = Math.floor((Date.now() + retryDelay(err)) / 1000);
+        await respond(`Discord only allows 2 thread renames per 10 minutes. Try again <t:${retryAt}:R> with:\n${quoteTitle(newTitle)}`);
+        return;
+      }
+      log.warn({ err, threadId: thread.id }, 'Failed to rename report thread');
+      await respond(`Failed to rename this thread. Your title was:\n${quoteTitle(newTitle)}`);
+      return;
+    }
+
+    if (outcome.noop) {
+      await respond('The title is already set to that.');
+      return;
+    }
+
+    log.info({ userId: interaction.user.id, threadId: thread.id, ticketId, name: outcome.name }, 'Report thread renamed');
+
+    const starter = await thread.fetchStarterMessage().catch(() => null);
+    const tracker = trackerRefFromStarter(starter);
+    if (tracker) await renameTrackerThread(guild, tracker.threadId, outcome.name);
+
+    await respond(`Renamed to **${outcome.name}**`);
   }
 
   @ButtonComponent({ id: /^split_/ })
@@ -1359,6 +1602,108 @@ export class BotReportActions {
     }
   }
 
+  @ModalComponent({ id: /^snooze_modal_/ })
+  async handleSnoozeSubmit(interaction: ModalSubmitInteraction) {
+    if (!(interaction.member instanceof GuildMember) || !hasStaffRole(interaction.member)) {
+      await interaction.reply({ content: 'Only staff can snooze reports.', flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    const thread = interaction.channel;
+    if (!thread?.isThread()) {
+      await interaction.reply({ content: 'This can only be used from a thread.', flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    const guild = interaction.guild;
+    if (!guild) {
+      await interaction.reply({ content: 'Could not resolve guild.', flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    if (await getScheduledClose(thread.id)) {
+      await interaction.reply({ content: CLOSING_LOCK_MSG, flags: MessageFlags.Ephemeral });
+      return;
+    }
+    if (await getScheduledSnooze(thread.id)) {
+      await interaction.reply({ content: 'This report is already snoozed.', flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    const duration = interaction.fields.getStringSelectValues('duration')[0] ?? DEFAULT_SNOOZE;
+    const reason = interaction.fields.getTextInputValue('reason').trim();
+    const wakeAt = Date.now() + snoozeDurationMs(duration);
+
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+    // Capture pre-snooze state so the wake can restore it verbatim.
+    const priorName = thread.name;
+    const priorTagIds = thread.appliedTags as string[];
+
+    // Flag the snoozed state in the forum list via the title emoji.
+    const base = stripLeadingEmoji(thread.name).replace(/^ /, '');
+    const snoozedName = `${SNOOZE_EMOJI} ${base}`.slice(0, 100);
+    if (thread.name !== snoozedName) {
+      await thread.setName(snoozedName).catch(err => log.warn({ err }, 'Failed to rename thread for snooze'));
+    }
+
+    const embed = new EmbedBuilder()
+      .setColor(COLORS.amber)
+      .setTitle('😴 Snoozed')
+      .setDescription(`Snoozed by <@${interaction.user.id}>.${reason ? `\n\n${reason}` : ''}`)
+      .addFields(wakesField(wakeAt))
+      .setTimestamp();
+    const reopenRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder().setCustomId('reopen_now').setLabel('Reopen Now').setStyle(ButtonStyle.Secondary).setEmoji('↩️'),
+    );
+    const snoozeMsg = await thread.send({ embeds: [embed], components: [reopenRow] }).catch(err => { log.warn({ err }, 'Failed to post snooze notice'); return null; });
+    if (!snoozeMsg) {
+      await interaction.editReply({ content: 'Failed to post the snooze notice.' });
+      return;
+    }
+
+    const forum = await getForum(guild, loadConfig().forumChannelId);
+    if (forum) {
+      await swapForumTags(thread, forum, { remove: ['OPEN', 'WAITING FOR DEV', 'WAITING FOR USER'], add: ['SNOOZED'] })
+        .catch(err => log.warn({ err }, 'Failed to swap forum tags for snooze'));
+    }
+    // Post the notice before archiving: a locked/archived thread can't receive it.
+    if (!thread.locked) await thread.setLocked(true).catch(err => log.warn({ err }, 'Failed to lock snoozed thread'));
+    if (!thread.archived) await thread.setArchived(true).catch(err => log.warn({ err }, 'Failed to archive snoozed thread'));
+
+    await scheduleSnooze(thread.id, wakeAt, snoozeMsg.id, reason || undefined, interaction.user.id, priorTagIds, priorName);
+
+    await interaction.editReply({ content: `Report snoozed — it will reopen <t:${Math.floor(wakeAt / 1000)}:R>. Use **Reopen Now** on the notice to cancel early.` });
+  }
+
+  @ButtonComponent({ id: 'reopen_now' })
+  async handleReopenNow(interaction: ButtonInteraction) {
+    if (!(interaction.member instanceof GuildMember) || !hasStaffRole(interaction.member)) {
+      await interaction.reply({ content: 'Only staff can reopen a snoozed report.', flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    const thread = interaction.channel;
+    if (!thread?.isThread()) {
+      await interaction.reply({ content: 'This can only be used from a thread.', flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    if (!(await getScheduledSnooze(thread.id))) {
+      await interaction.reply({ content: 'This report is not snoozed.', flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    const entry = await reopenSnoozedThread(thread);
+    if (!entry) {
+      await interaction.editReply({ content: 'This report is not snoozed.' });
+      return;
+    }
+    await finalizeSnoozeMessage(thread, entry.snoozeMessageId, { title: '↩️ Snooze Cancelled', cancelledBy: interaction.user.id });
+    await interaction.editReply({ content: 'Snooze cancelled — report reopened.' });
+  }
+
   @ButtonComponent({ id: /^assign_/ })
   @ButtonComponent({ id: /^close_/ })
   @ButtonComponent({ id: /^merge_/ })
@@ -1426,8 +1771,8 @@ export class ReportCommands {
 
   @Slash({ description: 'Open the staff actions menu for this report thread', name: 'staff-actions' })
   async staffActionsCommand(interaction: CommandInteraction) {
-    if (!(interaction.member instanceof GuildMember) || !hasStaffRole(interaction.member)) {
-      await interaction.reply({ content: 'Only staff can use staff actions.', flags: MessageFlags.Ephemeral });
+    if (!(interaction.member instanceof GuildMember) || !canRenameThread(interaction.member)) {
+      await interaction.reply({ content: 'You do not have permission to use this action.', flags: MessageFlags.Ephemeral });
       return;
     }
 
@@ -1444,12 +1789,24 @@ export class ReportCommands {
       return;
     }
 
-    await interaction.reply(buildStaffActionsReply(ticketId));
+    await interaction.reply(buildStaffActionsReply(ticketId, !hasStaffRole(interaction.member)));
   }
 }
 
 @Discord()
 export class BotReportStaffContextMenus {
+  @ContextMenu({ name: 'Rename Thread', type: ApplicationCommandType.Message, defaultMemberPermissions: 0n })
+  @Guild(guildId)
+  async renameContext(interaction: MessageContextMenuCommandInteraction) {
+    if (!(interaction.member instanceof GuildMember) || !canRenameThread(interaction.member)) {
+      await interaction.reply({ content: 'You do not have permission to rename report threads.', flags: MessageFlags.Ephemeral });
+      return;
+    }
+    const ctx = await resolveStaffActionContext(interaction);
+    if (!ctx) return;
+    await interaction.showModal(buildRenameModal(ctx.thread, ctx.ticketId));
+  }
+
   @ContextMenu({ name: 'Assign', type: ApplicationCommandType.Message, defaultMemberPermissions: PermissionFlagsBits.ManageThreads })
   @Guild(guildId)
   async assignContext(interaction: MessageContextMenuCommandInteraction) {
@@ -1472,6 +1829,14 @@ export class BotReportStaffContextMenus {
     const ctx = await resolveStaffActionContext(interaction);
     if (!ctx) return;
     await interaction.showModal(buildMergeModal(`merge_modal_${interaction.id}`));
+  }
+
+  @ContextMenu({ name: 'Snooze', type: ApplicationCommandType.Message, defaultMemberPermissions: PermissionFlagsBits.ManageThreads })
+  @Guild(guildId)
+  async snoozeContext(interaction: MessageContextMenuCommandInteraction) {
+    const ctx = await resolveStaffActionContext(interaction);
+    if (!ctx) return;
+    await interaction.showModal(buildSnoozeModal(ctx.ticketId));
   }
 
   @ContextMenu({ name: 'Close', type: ApplicationCommandType.Message, defaultMemberPermissions: PermissionFlagsBits.ManageThreads })

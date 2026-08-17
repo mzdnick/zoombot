@@ -13,6 +13,7 @@ export interface BotConfig {
   verifiedRole: string;
   pendingRole: string;
   staffRoles: string[];
+  scholarRole?: string;
   wikiRepo: string;
   wikiCacheDir: string;
   mainRepo: string;
@@ -57,6 +58,8 @@ export function loadConfig(): BotConfig {
     .filter(Boolean);
   if (staffRoles.length === 0) throw new Error('STAFF_ROLE is required');
 
+  const scholarRole = process.env.SCHOLAR_ROLE;
+
   // 'n/a' is the sentinel meaning "wiki disabled" (WIKI_REPO unset); the
   // init guard in src/handlers/events.ts checks for it before fetching.
   const wikiRepo = process.env.WIKI_REPO || 'n/a';
@@ -80,6 +83,7 @@ export function loadConfig(): BotConfig {
     verifiedRole,
     pendingRole,
     staffRoles,
+    scholarRole,
     wikiRepo,
     wikiCacheDir,
     mainRepo,

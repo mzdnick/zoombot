@@ -17,6 +17,7 @@ import { searchWiki, formatWikiResults } from '../wiki/searcher.js';
 import { WikiRateLimit } from './guards.js';
 import { initTitleSync } from './report/title-sync.js';
 import { initCloseScheduler } from './report/close-scheduler.js';
+import { initSnoozeScheduler } from './report/snooze-scheduler.js';
 import { COLORS } from '../util.js';
 
 const log = createLogger('events');
@@ -127,6 +128,7 @@ export class BotEvents {
 
     initTitleSync(client);
     initCloseScheduler(client);
+    initSnoozeScheduler(client);
 
     const commitHash = getCommitHash();
     if (commitHash) {
