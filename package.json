@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "StarPilot Discord bot - identity onboarding and report submission",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "NODE_NO_WARNINGS=1 tsx watch src/index.ts",

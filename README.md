@@ -40,3 +40,7 @@ npm run dev       # hot-reload via tsx
 npm run build
 npm start
 ```
+
+## License
+
+[MIT](LICENSE)
