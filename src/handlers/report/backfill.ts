@@ -101,7 +101,7 @@ export class BackfillCommands {
   })
   async backfill(interaction: CommandInteraction) {
     if (!(interaction.member instanceof GuildMember) ||
-        !interaction.member.roles.cache.has(loadConfig().staffRole)) {
+        !interaction.member.roles.cache.hasAny(...loadConfig().staffRoles)) {
       await interaction.reply({ content: 'Only staff can run a backfill.', flags: MessageFlags.Ephemeral });
       return;
     }
