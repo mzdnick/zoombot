@@ -9,10 +9,12 @@ const MAX_NON_RATE_LIMIT_RETRIES = 5;
 
 const CLOSING_PREFIX = '⏳ Closing ';
 
-interface ScheduledClose {
+export interface ScheduledClose {
   status: ReportStatus;
   closeAt: number;
   noticeMessageId: string;
+  /** Why the close was scheduled. 'dormant' closes are cancelled by new activity; staff/user ones are not. */
+  origin?: 'dormant' | 'manual';
   attempts?: number;
 }
 
@@ -38,15 +40,23 @@ class CloseScheduler extends ScheduledTimerIndex<ScheduledClose> {
     status: ReportStatus,
     closeAt: number,
     noticeMessageId: string,
+    origin?: 'dormant' | 'manual',
   ): Promise<boolean> {
     let scheduled = false;
     await this.mutate(index => {
       if (index[thread.id]) return;
-      index[thread.id] = { status, closeAt, noticeMessageId };
+      index[thread.id] = { status, closeAt, noticeMessageId, origin };
       scheduled = true;
     });
     if (scheduled) this.armTimer(thread.id, closeAt);
     return scheduled;
+  }
+
+  // Atomic cancel: racing cancellations can't both act on the same entry.
+  async claimClose(threadId: string): Promise<ScheduledClose | undefined> {
+    const entry = await this.claim(threadId);
+    this.clearTimer(threadId);
+    return entry;
   }
 
   protected async fire(threadId: string): Promise<void> {
@@ -102,8 +112,13 @@ export async function scheduleClose(
   status: ReportStatus,
   closeAt: number,
   noticeMessageId: string,
+  origin?: 'dormant' | 'manual',
 ): Promise<boolean> {
-  return scheduler.schedule(thread, status, closeAt, noticeMessageId);
+  return scheduler.schedule(thread, status, closeAt, noticeMessageId, origin);
+}
+
+export async function cancelScheduledClose(threadId: string): Promise<ScheduledClose | undefined> {
+  return scheduler.claimClose(threadId);
 }
 
 export function initCloseScheduler(c: Client): void {

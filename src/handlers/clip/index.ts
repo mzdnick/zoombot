@@ -53,7 +53,7 @@ const guildId = loadConfig().guildId;
 
 const URL_OPTION = {
   name: 'url',
-  description: 'connect.comma.ai route URL with time range',
+  description: 'connect.comma.ai or stable.konik.ai route URL with time range',
   required: true,
   type: ApplicationCommandOptionType.String,
 } as const;
@@ -124,7 +124,7 @@ export class ClipCommands {
     const urlInput = new TextInputBuilder({
       custom_id: 'clip_url',
       style: TextInputStyle.Short,
-      placeholder: 'https://connect.comma.ai/.../start/end',
+      placeholder: 'https://connect.comma.ai/.../start/end or https://stable.konik.ai/.../start/end',
       required: true,
       max_length: 512,
     });

@@ -45,6 +45,9 @@ import {
   MAX_TITLE_LEN,
 } from './title-sync.js';
 import { scheduleClose, getScheduledClose, nextCloseAt, closingNoticeField } from './close-scheduler.js';
+import { StoredReport } from './report-store.js';
+import { getFreeze } from './freeze-state.js';
+import { fixedButtonLabel, fixedModalTitle, labelForThread } from './report-copy.js';
 import {
   scheduleSnooze,
   getScheduledSnooze,
@@ -88,6 +91,18 @@ async function getOrCreateAssigneeTag(forum: import('discord.js').ForumChannel, 
     log.warn({ err, tagName }, 'Failed to create assignee tag');
     return null;
   }
+}
+
+async function ensureForumTag(forum: ForumChannel, name: string): Promise<ForumChannel> {
+  if (forum.availableTags.some(t => t.name === name)) return forum;
+  const updated = await forum.setAvailableTags([
+    ...forum.availableTags.map(t => ({ name: t.name, id: t.id, moderated: t.moderated, emoji: t.emoji ?? undefined })),
+    { name },
+  ]).catch(err => {
+    log.warn({ err, name }, 'Failed to create forum tag');
+    return null;
+  });
+  return updated ?? forum;
 }
 
 function hasStaffRole(member: GuildMember): boolean {
@@ -166,6 +181,8 @@ async function closeThread(thread: ThreadChannel, guild: import('discord.js').Gu
   // archive - archiving first blocks the lock edit.
   if (!thread.locked) await thread.setLocked(true);
   if (!thread.archived) await thread.setArchived(true);
+  await StoredReport.syncFromThread(thread);
+  await StoredReport.markClosed(thread.id);
 }
 
 // title-sync's deferred worker and restart recovery finalize closes; give it a
@@ -193,7 +210,7 @@ const waitCommitStore = createStore<{
   message: string; audience: string; submitterId: string; ticketId: string; threadId: string; choices: CommitChoice[];
 }>('wait-commit-pending', { ttl: 15 * 60 * 1000 });
 
-const readyReqStore = createStore<{ requiredShort: string; requiredDate?: string }>(
+const readyReqStore = createStore<{ requiredShort?: string; requiredDate?: string }>(
   'wait-ready-req', { ttl: 30 * 24 * 60 * 60 * 1000 });
 
 const pendingAdditionalReportStore = createStore<{
@@ -242,7 +259,7 @@ function buildAdditionalReportModal(customId: string): ModalBuilder {
 // Pre-"Reported By" threads put the reporting user as a leading mention in the content.
 const leadingMention = (content?: string | null): string => content?.trimStart().match(/^<@!?(\d+)>/)?.[1] ?? '';
 
-async function resolveSubmitterId(thread: ThreadChannel, guild: import('discord.js').Guild): Promise<string> {
+export async function resolveSubmitterId(thread: ThreadChannel, guild: import('discord.js').Guild): Promise<string> {
   const starter = await thread.fetchStarterMessage().catch(() => null);
   const fields = starter?.embeds[0]?.fields;
   const direct = fields?.find(f => f.name === 'By')?.value.match(/<@(\d+)>/)?.[1];
@@ -328,14 +345,18 @@ async function finalizeWaitUser(thread: ThreadChannel, forum: ForumChannel, para
     .catch(err => log.warn({ err }, 'Failed to swap forum tags for WAITING FOR USER'));
   await setThreadStatusEmoji(thread, 'waiting-for-user');
 
+  const needsRoute = params.mode !== 'anytime';
   const action = params.mode === 'anytime'
     ? "Click **Ready** below when you've tested and have feedback to share (no @pings please)."
-    : "A **new route** is needed to reopen this report. Click **Ready** below to submit one once you've tested (no @pings please).";
+    : "A **new route** is needed to reopen this report. Click **Send Route** below to submit one once you've tested (no @pings please).";
 
   let required = '';
   if (params.mode === 'newer' && params.requiredSha) {
     const committed = params.requiredDate ? discordTimestamp(params.requiredDate) : null;
     required = `\n\nThe route must be on commit ${formatGitCommit(params.requiredSha, `github.com/${loadConfig().mainRepo}`)} (${params.branch}${committed ? `, committed ${committed}` : ''}) or newer.`;
+  } else if (params.mode === 'newernow' && params.requiredDate) {
+    const committed = discordTimestamp(params.requiredDate);
+    required = `\n\nThe route must be on a commit newer than the latest one${committed ? ` as of ${committed}` : ''}. An update will be pushed to the testing branch \`Dom\` shortly - see the [branch switching guide](https://wiki.firestar.link/software/starpilot/#changing-branches) to switch to it.`;
   }
 
   const embed = new EmbedBuilder()
@@ -350,28 +371,35 @@ async function finalizeWaitUser(thread: ThreadChannel, forum: ForumChannel, para
     log.warn({ threadId: thread.id, ticketId: params.ticketId }, 'No submitter resolved; posting ungated Ready without Fixed button');
   }
   const readyAudience = params.submitterId ? params.audience : 'any';
+  const label = await labelForThread(thread.id, thread.name);
   const buttons = [
     new ButtonBuilder()
       .setCustomId(`ready_${params.mode}_${readyAudience}_${params.ticketId}_${params.submitterId}`)
-      .setLabel('Ready')
+      .setLabel(needsRoute ? 'Send Route' : 'Ready')
       .setStyle(ButtonStyle.Success)
-      .setEmoji('✅'),
+      .setEmoji(needsRoute ? '🛣️' : '✅'),
   ];
   if (params.submitterId) {
     buttons.push(
       new ButtonBuilder()
         .setCustomId(`fixed_${params.audience}_${params.ticketId}_${params.submitterId}`)
-        .setLabel('My Issue is Fixed')
+        .setLabel(fixedButtonLabel(label))
         .setStyle(ButtonStyle.Success)
         .setEmoji('🎉'),
     );
   }
   const row = new ActionRowBuilder<ButtonBuilder>().addComponents(...buttons);
 
-  const sent = await thread.send({ embeds: [embed], components: [row] });
-  if (params.mode === 'newer' && params.requiredSha) {
+  const sent = await thread.send({
+    content: params.submitterId ? `<@${params.submitterId}>` : undefined,
+    embeds: [embed],
+    components: [row],
+    allowedMentions: params.submitterId ? { users: [params.submitterId] } : undefined,
+  });
+  await StoredReport.syncFromThread(thread);
+  if (params.requiredDate) {
     await readyReqStore.set(sent.id, {
-      requiredShort: params.requiredShort ?? params.requiredSha.slice(0, 7),
+      requiredShort: params.requiredSha ? (params.requiredShort ?? params.requiredSha.slice(0, 7)) : undefined,
       requiredDate: params.requiredDate,
     });
   }
@@ -424,7 +452,8 @@ function buildWaitUserModal(ticketId: string): ModalBuilder {
     .addOptions(
       { label: 'Anytime', value: 'anytime', description: 'The user can respond right away', default: true },
       { label: 'With a new route', value: 'route', description: 'Responding requires submitting a new route' },
-      { label: 'From a newer commit', value: 'newer', description: 'New route must be on a chosen commit or newer' },
+      { label: 'From commit newer than now', value: 'newernow', description: 'New route must be on a commit newer than the latest one now' },
+      { label: 'Newer than a specific commit', value: 'newer', description: 'New route must be on a chosen commit or newer' },
     );
   modal.addLabelComponents(new LabelBuilder().setLabel('When may the user reopen?').setStringSelectMenuComponent(modeSelect));
 
@@ -723,7 +752,8 @@ export async function submitAdditionalReport(params: {
         const routeShort = meta.git_commit.slice(0, 7);
         const routeWhen = discordTimestamp(meta.git_commit_date);
         const reqWhen = req.requiredDate ? discordTimestamp(req.requiredDate) : null;
-        await reply(`Route **rejected** - it's from an older build than required: route commit \`${routeShort}\`${routeWhen ? ` (committed ${routeWhen})` : ''} predates required \`${req.requiredShort}\`${reqWhen ? ` (committed ${reqWhen})` : ''}. Nothing was submitted - the report is still **WAITING FOR USER**; test on a newer build and submit a fresh route.`);
+        const reqLabel = req.requiredShort ? `required \`${req.requiredShort}\`` : 'the required build';
+        await reply(`Route **rejected** - it's from an older build than required: route commit \`${routeShort}\`${routeWhen ? ` (committed ${routeWhen})` : ''} predates ${reqLabel}${reqWhen ? ` (committed ${reqWhen})` : ''}. Nothing was submitted - the report is still **WAITING FOR USER**; test on a newer build and submit a fresh route.`);
         return;
       }
     }
@@ -778,19 +808,30 @@ export async function submitAdditionalReport(params: {
         .catch(err => log.warn({ err }, 'Failed to swap forum tags for WAITING FOR DEV'));
     }
     await setThreadStatusEmoji(thread, 'waiting-for-dev');
+    await StoredReport.syncFromThread(thread);
     await completeReadyMessage(thread, ready.readyMsgId, `A new route was submitted by <@${userId}> - [Additional Report #${additionalReportId}](${msg.url})`);
     await readyReqStore.delete(ready.readyMsgId);
     await notifyAssigneeReady(thread, userId, msg.url);
     lifecycleNote = ' The report is now marked **WAITING FOR DEV**.';
   }
 
-  await reply(`Route added to the tracker thread.${!primary.public ? ' The route is not yet public — please make it public so staff can view it.' : ''}${lifecycleNote}`);
+  await StoredReport.update(thread.id, { lastActivityAt: Date.now() });
+  await reply(`Route added to the tracker thread.${!primary.public ? ' The route is not yet public - please make it public so staff can view it.' : ''}${lifecycleNote}`);
 }
 
+async function rejectIfFrozen(interaction: ButtonInteraction | StringSelectMenuInteraction | ModalSubmitInteraction): Promise<boolean> {
+  const freeze = await getFreeze();
+  if (!freeze) return false;
+  if (interaction.member instanceof GuildMember && hasStaffRole(interaction.member)) return false;
+  const expiry = freeze.expiresAt ? ` It thaws <t:${Math.floor(freeze.expiresAt / 1000)}:R>.` : '';
+  await interaction.reply({ content: `**${freeze.message}**${expiry}`, flags: MessageFlags.Ephemeral });
+  return true;
+}
 @Discord()
 export class BotReportActions {
   @ButtonComponent({ id: /^additional_report_/ })
   async additionalReport(interaction: ButtonInteraction) {
+    if (await rejectIfFrozen(interaction)) return;
     await interaction.showModal(buildAdditionalReportModal(`additional_report_modal_${interaction.id}`));
   }
 
@@ -879,6 +920,17 @@ export class BotReportActions {
       return;
     }
 
+    if (mode === 'newernow') {
+      const requiredDate = new Date().toISOString();
+      await finalizeWaitUser(thread, forum, { mode, audience, message, submitterId, ticketId, requiredDate });
+      const committed = discordTimestamp(requiredDate);
+      await interaction.editReply({
+        content: `Report marked **WAITING FOR USER** - required a build newer than the latest commit${committed ? ` as of ${committed}` : ''}.`,
+        components: [],
+      });
+      return;
+    }
+
     if (mode === 'newer') {
       const choices = await fetchCommitChoices();
       if (choices.length === 0) {
@@ -913,6 +965,7 @@ export class BotReportActions {
 
   @SelectMenuComponent({ id: /^wcommit_/ })
   async handleWaitCommitSelect(interaction: StringSelectMenuInteraction) {
+    if (await rejectIfFrozen(interaction)) return;
     const token = interaction.customId.split('_')[1];
     const pending = await waitCommitStore.get(token);
     if (!pending) {
@@ -978,6 +1031,8 @@ export class BotReportActions {
   @ButtonComponent({ id: /^ready_/ })
   async handleReadyButton(interaction: ButtonInteraction) {
     const [, mode, audience, ticketId, submitterId] = interaction.customId.split('_');
+
+    if (await rejectIfFrozen(interaction)) return;
 
     if (interaction.channelId && await getScheduledClose(interaction.channelId)) {
       await interaction.reply({ content: CLOSING_LOCK_MSG, flags: MessageFlags.Ephemeral });
@@ -1072,6 +1127,7 @@ export class BotReportActions {
         .catch(err => log.warn({ err }, 'Failed to swap forum tags for WAITING FOR DEV'));
     }
     await setThreadStatusEmoji(thread, 'waiting-for-dev');
+    await StoredReport.syncFromThread(thread);
     await completeReadyMessage(thread, msgId, feedbackMsg
       ? `Feedback submitted by <@${interaction.user.id}> - [view it](${feedbackMsg.url})`
       : `Marked ready by <@${interaction.user.id}>`);
@@ -1093,7 +1149,7 @@ export class BotReportActions {
       const isStaff = interaction.member instanceof GuildMember && hasStaffRole(interaction.member);
       if (isStaff) {
         await interaction.reply({
-          content: 'Only the original reporter can mark their issue as fixed. If closing this was intentional, use **Staff Actions → Close** below.',
+          content: 'Only the original reporter can mark this as resolved. If closing this was intentional, use **Staff Actions → Close** below.',
           components: [new ActionRowBuilder<ButtonBuilder>().addComponents(
             new ButtonBuilder().setCustomId(`staff_actions_${ticketId}`).setLabel('Staff Actions').setStyle(ButtonStyle.Primary).setEmoji('🛠️'),
           )],
@@ -1101,13 +1157,15 @@ export class BotReportActions {
         });
         return;
       }
-      await interaction.reply({ content: 'Only the original reporter can mark this issue as fixed.', flags: MessageFlags.Ephemeral });
+      await interaction.reply({ content: 'Only the original reporter can mark this as resolved.', flags: MessageFlags.Ephemeral });
       return;
     }
 
+    const threadName = interaction.channel?.isThread() ? interaction.channel.name : '';
+    const label = await labelForThread(interaction.channelId, threadName);
     const modal = new ModalBuilder()
       .setCustomId(`fixed_modal_${ticketId}_${interaction.message.id}`)
-      .setTitle('Confirm - Issue Resolved?');
+      .setTitle(fixedModalTitle(label));
     const noteInput = new TextInputBuilder({
       custom_id: 'note',
       style: TextInputStyle.Paragraph,
@@ -1406,6 +1464,7 @@ export class BotReportActions {
     }
 
     log.info({ userId: interaction.user.id, threadId: thread.id, ticketId, name: outcome.name }, 'Report thread renamed');
+    await StoredReport.update(thread.id, { threadName: outcome.name });
 
     const starter = await thread.fetchStarterMessage().catch(() => null);
     const tracker = trackerRefFromStarter(starter);
@@ -1489,6 +1548,25 @@ export class BotReportActions {
     });
 
     const splitTicketId = String(parseInt(newThread.id.slice(-7), 10));
+
+    // Creation hook: a split is a new report owned by the original submitter.
+    // A split is a new report owned by the original submitter.
+    const splitSubmitter = await resolveSubmitterId(thread, guild);
+    if (splitSubmitter) {
+      const splitTagNameById = new Map(forum.availableTags.map(t => [t.id, t.name]));
+      await StoredReport.record({
+        threadId: newThread.id,
+        ticketId: splitTicketId,
+        reporterId: splitSubmitter,
+        label: 'Split',
+        threadName: newThread.name,
+        url: newThread.url,
+        tagNames: (newThread.appliedTags as string[]).map(id => splitTagNameById.get(id) ?? ''),
+        createdTimestamp: newThread.createdTimestamp ?? Date.now(),
+        lastActivityAt: Date.now(),
+      });
+    }
+
     const splitStarter = await newThread.fetchStarterMessage();
     if (splitStarter) {
       const actionRow = buildActionRow(splitTicketId);
@@ -1662,8 +1740,9 @@ export class BotReportActions {
       return;
     }
 
-    const forum = await getForum(guild, loadConfig().forumChannelId);
-    if (forum) {
+    const fetched = await getForum(guild, loadConfig().forumChannelId);
+    if (fetched) {
+      const forum = await ensureForumTag(fetched, 'SNOOZED');
       await swapForumTags(thread, forum, { remove: ['OPEN', 'WAITING FOR DEV', 'WAITING FOR USER'], add: ['SNOOZED'] })
         .catch(err => log.warn({ err }, 'Failed to swap forum tags for snooze'));
     }
@@ -1672,8 +1751,9 @@ export class BotReportActions {
     if (!thread.archived) await thread.setArchived(true).catch(err => log.warn({ err }, 'Failed to archive snoozed thread'));
 
     await scheduleSnooze(thread.id, wakeAt, snoozeMsg.id, reason || undefined, interaction.user.id, priorTagIds, priorName);
+    await StoredReport.syncFromThread(thread);
 
-    await interaction.editReply({ content: `Report snoozed — it will reopen <t:${Math.floor(wakeAt / 1000)}:R>. Use **Reopen Now** on the notice to cancel early.` });
+    await interaction.editReply({ content: `Report snoozed - it will reopen <t:${Math.floor(wakeAt / 1000)}:R>. Use **Reopen Now** on the notice to cancel early.` });
   }
 
   @ButtonComponent({ id: 'reopen_now' })
@@ -1701,7 +1781,7 @@ export class BotReportActions {
       return;
     }
     await finalizeSnoozeMessage(thread, entry.snoozeMessageId, { title: '↩️ Snooze Cancelled', cancelledBy: interaction.user.id });
-    await interaction.editReply({ content: 'Snooze cancelled — report reopened.' });
+    await interaction.editReply({ content: 'Snooze cancelled - report reopened.' });
   }
 
   @ButtonComponent({ id: /^assign_/ })
