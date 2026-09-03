@@ -20,6 +20,8 @@ export interface BotConfig {
   openaiEndpoint?: string;
   openaiApiKey?: string;
   openaiModel?: string;
+  maxActiveReports: number;
+  dormantCloseDays: number;
 }
 
 export function loadConfig(): BotConfig {
@@ -66,6 +68,10 @@ export function loadConfig(): BotConfig {
   const openaiApiKey = process.env.OPENAI_API_KEY;
   const openaiModel = process.env.OPENAI_MODEL;
 
+  const maxActiveReportsRaw = parseInt(process.env.MAX_ACTIVE_REPORTS ?? '', 10);
+  const maxActiveReports = Number.isNaN(maxActiveReportsRaw) ? 2 : Math.max(0, maxActiveReportsRaw);
+  const dormantCloseDays = Math.max(1, parseInt(process.env.DORMANT_CLOSE_DAYS ?? '', 10) || 14);
+
   return {
     token,
     guildId,
@@ -85,5 +91,7 @@ export function loadConfig(): BotConfig {
     openaiEndpoint,
     openaiApiKey,
     openaiModel,
+    maxActiveReports,
+    dormantCloseDays,
   };
 }

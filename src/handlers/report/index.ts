@@ -33,6 +33,7 @@ import {
   type RlogCheckResult,
 } from '../../comma.js';
 import {
+  getForum,
   routeNumberLabel,
   parseConfirmCustomId,
   handleRefreshRoutes,
@@ -45,6 +46,16 @@ import {
 } from './report-service.js';
 import { titleGenerator } from './title-generator.js';
 import { konikViewerUrl } from '../../konik.js';
+import { getScheduledSnooze } from './snooze-scheduler.js';
+import { StoredReport } from './report-store.js';
+import { getFreeze } from './freeze-state.js';
+import {
+  CATEGORY_ORDER,
+  paginateReports,
+  reportCategory,
+  sortReports,
+  type ReportSummary,
+} from './my-reports.js';
 
 const log = createLogger('report');
 
@@ -74,25 +85,61 @@ const pendingStore = createStore<PendingBugReport>('pending-bug-reports', { ttl:
 
 const gateTokensInFlight = new Set<string>();
 
+
+
+// Store-backed, so it stays well inside the undeferred showModal window.
+async function ensureNotFrozen(interaction: ButtonInteraction): Promise<boolean> {
+  const freeze = await getFreeze();
+  if (!freeze) return true;
+  const expiry = freeze.expiresAt ? ` It thaws <t:${Math.floor(freeze.expiresAt / 1000)}:R>.` : '';
+  await interaction.reply({
+    content: `**${freeze.message}**${expiry}`,
+    flags: MessageFlags.Ephemeral,
+  });
+  return false;
+}
+
 function reporterFromModalId(interaction: ModalSubmitInteraction): string {
   const match = interaction.customId.match(/_obo_(\d+)$/);
   return match ? match[1] : interaction.user.id;
+}
+
+// Fast pre-modal gate so a capped user never fills out the form. Store-backed,
+// so it stays well inside the undeferred showModal window. submitReport
+// re-checks authoritatively under the creation lock.
+async function ensureWithinActiveLimit(interaction: ButtonInteraction): Promise<boolean> {
+  const limit = loadConfig().maxActiveReports;
+  if (limit <= 0) return true;
+  const active = await StoredReport.activeForUser(interaction.user.id);
+  if (active.length < limit) return true;
+  const lines = active.map(r => `- [${r.data.threadName}](${r.url})`).join('\n');
+  await interaction.reply({
+    content: `You can only have **${limit}** active report thread(s) at a time. Please wait until one of yours is resolved, or add to an existing thread instead:\n${lines}`,
+    flags: MessageFlags.Ephemeral,
+  });
+  return false;
 }
 
 @Discord()
 export class BotReport {
   @ButtonComponent({ id: 'report_bug' })
   async bug(interaction: ButtonInteraction) {
+    if (!(await ensureNotFrozen(interaction))) return;
+    if (!(await ensureWithinActiveLimit(interaction))) return;
     await showBugModal(interaction);
   }
 
   @ButtonComponent({ id: 'report_feedback' })
   async feedback(interaction: ButtonInteraction) {
+    if (!(await ensureNotFrozen(interaction))) return;
+    if (!(await ensureWithinActiveLimit(interaction))) return;
     await showFeedbackModal(interaction, 'Feedback');
   }
 
   @ButtonComponent({ id: 'report_feature' })
   async feature(interaction: ButtonInteraction) {
+    if (!(await ensureNotFrozen(interaction))) return;
+    if (!(await ensureWithinActiveLimit(interaction))) return;
     await showFeedbackModal(interaction, 'Feature Request');
   }
 
@@ -114,6 +161,97 @@ export class BotReport {
   @ButtonComponent({ id: 'refresh_routes' })
   async refreshRoutes(interaction: ButtonInteraction) {
     await handleRefreshRoutes(interaction);
+  }
+
+  @ButtonComponent({ id: 'view_my_reports' })
+  async viewMyReports(interaction: ButtonInteraction) {
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    await interaction.editReply(await this.myReportsPayload(interaction, 1));
+  }
+
+  @ButtonComponent({ id: /^myreports_page_\d+$/ })
+  async myReportsPage(interaction: ButtonInteraction) {
+    await interaction.deferUpdate();
+    const page = parseInt(interaction.customId.slice('myreports_page_'.length), 10);
+    await interaction.editReply(await this.myReportsPayload(interaction, page));
+  }
+
+  private async myReportsPayload(interaction: ButtonInteraction, page: number) {
+    const guild = interaction.guild;
+    if (!guild) return { content: 'Could not resolve guild.', components: [] };
+
+    const forum = await getForum(guild, loadConfig().forumChannelId);
+    if (!forum) return { content: 'Could not resolve the report forum.', components: [] };
+
+    const userId = interaction.user.id;
+    // Insertion order from forUser; sort before pagination so ordering holds across pages.
+    const reports: ReportSummary[] = sortReports(
+      (await StoredReport.forUser(userId))
+        .map(r => ({ ...r.toSummary(), snoozedUntil: undefined })),
+    );
+
+    if (reports.length === 0) {
+      return { content: `No reports found in <#${forum.id}> for <@${userId}>.`, components: [] };
+    }
+
+    const { pageItems, page: current, totalPages } = paginateReports(reports, page);
+
+    // Re-read live state for just this page's threads.
+    const tagNameById = new Map(forum.availableTags.map(tag => [tag.id, tag.name]));
+    const fresh = await Promise.all(pageItems.map(async report => {
+      const channel = await guild.channels.fetch(report.threadId).catch(() => null);
+      if (!channel?.isThread()) return report;
+      const snooze = await getScheduledSnooze(channel.id).catch(() => undefined);
+      await StoredReport.syncFromThread(channel);
+      return {
+        ...report,
+        threadName: channel.name,
+        tagNames: channel.appliedTags.map(id => tagNameById.get(id) ?? ''),
+        archived: channel.archived ?? false,
+        snoozedUntil: snooze?.wakeAt,
+      };
+    }));
+
+    const sections: string[] = [`You have **${reports.length}** report(s) in <#${forum.id}>, sorted by status - those waiting on you first.`];
+    for (const category of CATEGORY_ORDER) {
+      const lines = fresh
+        .filter(report => reportCategory(report.tagNames, report.archived) === category)
+        .map(report => {
+          if (report.snoozedUntil) {
+            const until = Math.floor(report.snoozedUntil / 1000);
+            return `[${report.threadName}](${report.url}) - snoozed until <t:${until}:f>`;
+          }
+          const created = Math.floor(report.createdTimestamp / 1000);
+          return `[${report.threadName}](${report.url}) - <t:${created}:R>`;
+        });
+      if (lines.length > 0) sections.push(`**${category}**\n${lines.join('\n')}`);
+    }
+
+    const embed = new EmbedBuilder()
+      .setTitle('📋 Your Reports')
+      .setColor(COLORS.blurple)
+      .setFooter({ text: `Page ${current} of ${totalPages}` });
+    // Long thread names can still overflow the 4096-char description cap;
+    // drop oldest-listed lines rather than failing the whole reply.
+    let description = sections.join('\n\n');
+    while (description.length > 4096 && sections.length > 1) {
+      sections.pop();
+      description = sections.join('\n\n');
+    }
+    embed.setDescription(description.slice(0, 4096));
+
+    const row = new ActionRowBuilder<ButtonBuilder>();
+    if (current > 1) {
+      row.addComponents(new ButtonBuilder()
+        .setCustomId(`myreports_page_${current - 1}`).setLabel('Previous')
+        .setStyle(ButtonStyle.Secondary).setEmoji('◀️'));
+    }
+    if (current < totalPages) {
+      row.addComponents(new ButtonBuilder()
+        .setCustomId(`myreports_page_${current + 1}`).setLabel('Next')
+        .setStyle(ButtonStyle.Secondary).setEmoji('▶️'));
+    }
+    return { embeds: [embed], components: row.components.length > 0 ? [row] : [] };
   }
 
   @ModalComponent({ id: /^bug_modal/ })
@@ -146,6 +284,12 @@ export class BotReportOnBehalf {
       await interaction.reply({ content: "You can't open a report on behalf of a bot.", flags: MessageFlags.Ephemeral });
       return;
     }
+    const freeze = await getFreeze();
+    if (freeze) {
+      const expiry = freeze.expiresAt ? ` It thaws <t:${Math.floor(freeze.expiresAt / 1000)}:R>.` : '';
+      await interaction.reply({ content: `**${freeze.message}**${expiry}`, flags: MessageFlags.Ephemeral });
+      return;
+    }
 
     const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder().setCustomId(`obo_bug_${target.id}`).setLabel('Bug Report').setStyle(ButtonStyle.Primary).setEmoji('🐛'),
@@ -161,6 +305,7 @@ export class BotReportOnBehalf {
 
   @ButtonComponent({ id: /^obo_/ })
   async oboChoice(interaction: ButtonInteraction) {
+    if (!(await ensureNotFrozen(interaction))) return;
     const [, type, targetId] = interaction.customId.split('_');
     if (type === 'bug') {
       await showBugModal(interaction, targetId);
@@ -433,6 +578,7 @@ async function handleRlogGateButton(interaction: ButtonInteraction, force: boole
 }
 
 async function handleConfirmRoute(interaction: ButtonInteraction) {
+  if (!(await ensureNotFrozen(interaction))) return;
   const parsed = parseConfirmCustomId(interaction.customId);
   if (!parsed) {
     await interaction.reply({ content: 'Invalid or expired confirmation button.', flags: MessageFlags.Ephemeral });

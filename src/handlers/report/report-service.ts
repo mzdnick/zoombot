@@ -10,10 +10,28 @@ import { createLogger } from '../../logger.js';
 import { getIndex } from '../../wiki/wiki.js';
 import { searchWiki, formatWikiResults } from '../../wiki/searcher.js';
 import { getForum, createRouteTrackerThread, addAdditionalRoutesToTracker, encodeConfirmCustomId, buildConfirmRows, TRACKER_FIELD_PREFIX } from './route-tracker.js';
+import { StoredReport } from './report-store.js';
+import { isFrozen } from './freeze-state.js';
 import { STATUS_EMOJI, isRateLimit } from './title-sync.js';
 import type { ExtractedRoute, RouteValidation } from '../../comma.js';
 
 const log = createLogger('report-service');
+
+let shareRouteCommandId: string | null = null;
+let shareRouteResolved = false;
+
+async function getShareRouteCommandId(guild: import('discord.js').Guild): Promise<string | null> {
+  if (!shareRouteResolved) {
+    try {
+      const cmds = await guild.commands.fetch();
+      shareRouteCommandId = cmds.find(c => c.name === 'share-route')?.id ?? null;
+      shareRouteResolved = true;
+    } catch (err) {
+      log.warn({ err }, 'Failed to fetch guild commands for share-route link');
+    }
+  }
+  return shareRouteCommandId;
+}
 
 export function resolveTagIds(forum: ForumChannel, names: string[]): string[] {
   return names
@@ -130,26 +148,71 @@ export async function submitReport(
     return;
   }
 
-  const generatedTitle = await params.title.catch(() => null);
-
-  const tagIds = params.tagNames.length > 0 ? resolveTagIds(forum, params.tagNames) : undefined;
-
-  let thread;
-  try {
-    thread = await forum.threads.create({
-      // Ticket id omitted here: adding it would need a post-create rename, spending
-      // one of the 2-per-10-min title edits. title-sync folds it in on first status change.
-      name: formatThreadTitle(STATUS_EMOJI['new'], params.label, generatedTitle, null),
-      message: { content: `<@${params.reporterId}>`, embeds: [params.embed] },
-      appliedTags: tagIds,
-    });
-  } catch (err) {
-    log.error({ err }, 'Failed to create thread');
-    await interaction.editReply({ content: 'Failed to create thread. Contact an admin.' });
+  // Freezes block everyone, staff on behalf of included.
+  if (await isFrozen()) {
+    await interaction.editReply({ content: 'Reports are currently frozen - new submissions are paused.', components: [] });
     return;
   }
 
-  const ticketId = String(parseInt(thread.id.slice(-7), 10));
+  // The cap throttles end users; staff acting on a user's behalf bypasses it.
+  const limit = config.maxActiveReports;
+  const onBehalfOf = params.reporterId !== interaction.user.id;
+  const gated = limit > 0 && !onBehalfOf;
+
+  // One closure so the gated path can hold the creation lock across check→create→record.
+  const createThread = async (): Promise<{ thread: ThreadChannel; ticketId: string } | null> => {
+    if (gated) {
+      const active = await StoredReport.activeForUser(params.reporterId);
+      if (active.length >= limit) {
+        const lines = active.map(r => `- [${r.data.threadName}](${r.url})`).join('\n');
+        await interaction.editReply({
+          content: `You can only have **${limit}** active report thread(s) at a time. Please wait until one of yours is resolved, or add to an existing thread instead:\n${lines}`,
+          components: [],
+        });
+        return null;
+      }
+    }
+
+    const generatedTitle = await params.title.catch(() => null);
+    const tagIds = params.tagNames.length > 0 ? resolveTagIds(forum, params.tagNames) : undefined;
+
+    let thread;
+    try {
+      thread = await forum.threads.create({
+        // Ticket id omitted here: adding it would need a post-create rename, spending
+        // one of the 2-per-10-min title edits. title-sync folds it in on first status change.
+        name: formatThreadTitle(STATUS_EMOJI['new'], params.label, generatedTitle, null),
+        message: { content: `<@${params.reporterId}>`, embeds: [params.embed] },
+        appliedTags: tagIds,
+      });
+    } catch (err) {
+      log.error({ err }, 'Failed to create thread');
+      await interaction.editReply({ content: 'Failed to create thread. Contact an admin.' });
+      return null;
+    }
+
+    const ticketId = String(parseInt(thread.id.slice(-7), 10));
+
+    await StoredReport.record({
+      threadId: thread.id,
+      ticketId,
+      reporterId: params.reporterId,
+      label: params.label,
+      threadName: thread.name,
+      url: thread.url,
+      tagNames: params.tagNames,
+      createdTimestamp: thread.createdTimestamp ?? Date.now(),
+      lastActivityAt: Date.now(),
+    });
+
+    return { thread, ticketId };
+  };
+
+  const created = await (gated
+    ? StoredReport.withCreationLock(params.reporterId, createThread)
+    : createThread());
+  if (!created) return;
+  const { thread, ticketId } = created;
 
   params.embed.setTitle(`${params.label} ${ticketId}`);
 
@@ -211,6 +274,13 @@ export async function submitReport(
       log.error({ err }, 'Failed to pin starter message');
     });
   }
+
+  const shareRouteId = await getShareRouteCommandId(guild);
+  await thread.send(
+    `Please do not send raw route URLs or route IDs in this thread. To share a new route, use the **Additional Report** button${shareRouteId ? ` or </share-route:${shareRouteId}>` : ' or the `/share-route` command'} instead.`,
+  ).catch(err => {
+    log.error({ err }, 'Failed to send route-sharing notice');
+  });
 
   await interaction.editReply({
     content: `${params.label} **${ticketId}** submitted! [View thread](${thread.url})`,

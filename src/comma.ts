@@ -365,6 +365,38 @@ export type RouteLogIssueInput = Pick<ExtractedRoute, 'originalText' | 'public' 
   rlogCheck?: RlogCheckResult;
 };
 
+// Discord caps message content at 2000 chars, so compress runs ("1414–2155")
+// and truncate pathological lists rather than joining every segment number.
+const SEGMENT_LIST_MAX = 400;
+
+function pushRange(ranges: string[], start: number, prev: number): void {
+  if (start === prev) ranges.push(`${start}`);
+  else if (prev - start >= 2) ranges.push(`${start}–${prev}`);
+  else ranges.push(`${start}, ${prev}`);
+}
+
+export function formatSegmentList(segments: number[]): string {
+  const ranges: string[] = [];
+  let start = segments[0]!;
+  let prev = start;
+  for (const s of segments.slice(1)) {
+    if (s === prev + 1) {
+      prev = s;
+      continue;
+    }
+    pushRange(ranges, start, prev);
+    start = prev = s;
+  }
+  pushRange(ranges, start, prev);
+
+  let list = ranges.join(', ');
+  while (list.length > SEGMENT_LIST_MAX && ranges.length > 1) {
+    ranges.pop();
+    list = `${ranges.join(', ')}, …and more`;
+  }
+  return list;
+}
+
 export function computeRouteLogIssues(routes: RouteLogIssueInput[]): string[] {
   const issues: string[] = [];
   for (const r of routes) {
@@ -373,7 +405,7 @@ export function computeRouteLogIssues(routes: RouteLogIssueInput[]): string[] {
     } else if (r.rlogCheck?.mode === 'whole' && !r.rlogsAvailable) {
       issues.push(`\`${r.originalText}\` is missing some logs. Upload all logs from your device, then check again.`);
     } else if (r.rlogCheck?.mode === 'segment' && r.rlogCheck.missing.length > 0) {
-      const segList = r.rlogCheck.missing.join(', ');
+      const segList = formatSegmentList(r.rlogCheck.missing);
       issues.push(`\`${r.originalText}\` is missing logs for segment(s) **${segList}**. Upload them, then check again.`);
     }
   }

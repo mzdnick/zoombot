@@ -133,10 +133,12 @@ export function getClipConfig(): ClipConfig | null {
   return { endpoint: endpoint.replace(/\/+$/, ''), apiKey, maxDuration, allowFaceSwap };
 }
 
+const CLIP_ROUTE_HOSTS = new Set(['connect.comma.ai', 'stable.konik.ai']);
+
 export function parseRouteUrl(url: string): { route: string; duration: number } | null {
   try {
     const parsed = new URL(url.trim());
-    if (parsed.hostname !== 'connect.comma.ai') return null;
+    if (!CLIP_ROUTE_HOSTS.has(parsed.hostname)) return null;
 
     const segments = parsed.pathname.split('/').filter(Boolean);
     if (segments.length < 3) return null;
@@ -380,8 +382,9 @@ export async function handleClipRequest(
   if (!parsed) {
     await sendEphemeral(interaction,
       'Invalid Route URL',
-      'Must be a connect.comma.ai URL with a time range:\n' +
-      '`https://connect.comma.ai/{dongle_id}/{route_id}/{start}/{end}`',
+      'Must be a connect.comma.ai or stable.konik.ai URL with a time range:\n' +
+      '`https://connect.comma.ai/{dongle_id}/{route_id}/{start}/{end}`\n' +
+      '`https://stable.konik.ai/{dongle_id}/{route_id}/{start}/{end}`',
     );
     return;
   }

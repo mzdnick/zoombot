@@ -18,6 +18,9 @@ import { WikiRateLimit } from './guards.js';
 import { initTitleSync } from './report/title-sync.js';
 import { initCloseScheduler } from './report/close-scheduler.js';
 import { initSnoozeScheduler } from './report/snooze-scheduler.js';
+import { initDormantScheduler } from './report/dormant-scheduler.js';
+import { recoverFreeze } from './report/freeze-service.js';
+import { getFreeze } from './report/freeze-state.js';
 import { COLORS } from '../util.js';
 
 const log = createLogger('events');
@@ -64,12 +67,16 @@ export class BotEvents {
       'Welcome to **StarPilot Server**! To gain access to the rest of the community, please set your server nickname and register your primary vehicle.\n\nYou can click this button at any time to update your vehicle or name in the future.',
     ).catch(err => log.error({ err }, 'Failed to set up identification button'));
 
+    await recoverFreeze(client);
+    const frozen = await getFreeze();
+
     await this.ensureButtonMessage(
       guild, config.reportButtonChannelId,
       [
         { label: 'Bug Report', customId: 'report_bug', style: ButtonStyle.Primary, emoji: '🐛' },
         { label: 'Feedback', customId: 'report_feedback', style: ButtonStyle.Secondary, emoji: '💬' },
         { label: 'Feature Request', customId: 'report_feature', style: ButtonStyle.Success, emoji: '✨' },
+        { label: 'View My Reports', customId: 'view_my_reports', style: ButtonStyle.Primary, emoji: '📋' },
       ],
       undefined,
       [
@@ -99,6 +106,7 @@ export class BotEvents {
           )
           .setColor(5822093),
       ],
+      frozen ? ['report_bug', 'report_feedback', 'report_feature'] : undefined,
     ).catch(err => log.error({ err }, 'Failed to set up report button'));
 
     // Initialize wiki search
@@ -124,6 +132,7 @@ export class BotEvents {
     initTitleSync(client);
     initCloseScheduler(client);
     initSnoozeScheduler(client);
+    initDormantScheduler(client);
 
     const commitHash = getCommitHash();
     if (commitHash) {
@@ -206,6 +215,7 @@ export class BotEvents {
     buttons: Array<{ label: string; customId: string; style: ButtonStyle; emoji: string }>,
     content?: string,
     embeds?: EmbedBuilder[],
+    disabledButtonIds?: string[],
   ) {
     const channel = await guild.channels.fetch(channelId);
     if (!channel?.isTextBased()) {
@@ -224,15 +234,16 @@ export class BotEvents {
     const message = await channel.send({
       content,
       embeds,
-      components: [this.buttonRow(buttons)],
+      components: [this.buttonRow(buttons, disabledButtonIds)],
     });
     await message.pin().catch(err => log.error({ err }, 'Failed to pin button'));
   }
 
-  private buttonRow(buttons: Array<{ label: string; customId: string; style: ButtonStyle; emoji: string }>) {
+  private buttonRow(buttons: Array<{ label: string; customId: string; style: ButtonStyle; emoji: string }>, disabledButtonIds?: string[]) {
     return new ActionRowBuilder<ButtonBuilder>().addComponents(
       ...buttons.map(b =>
-        new ButtonBuilder().setCustomId(b.customId).setLabel(b.label).setStyle(b.style).setEmoji(b.emoji),
+        new ButtonBuilder().setCustomId(b.customId).setLabel(b.label).setStyle(b.style).setEmoji(b.emoji)
+          .setDisabled(disabledButtonIds?.includes(b.customId) ?? false),
       ),
     );
   }

@@ -1,5 +1,6 @@
 import type { Client, ThreadChannel } from 'discord.js';
-import { EmbedBuilder } from 'discord.js';
+import { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } from 'discord.js';
+import { createLogger } from '../../logger.js';
 import { tryStatusClose, withThreadLock, type ReportStatus } from './title-sync.js';
 import { ScheduledTimerIndex } from './scheduled-timer-index.js';
 
@@ -9,10 +10,20 @@ const MAX_NON_RATE_LIMIT_RETRIES = 5;
 
 const CLOSING_PREFIX = '⏳ Closing ';
 
-interface ScheduledClose {
+const log = createLogger('close-scheduler');
+
+export function cancelCloseRow(threadId: string): ActionRowBuilder<ButtonBuilder> {
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder().setCustomId(`cancel_close_${threadId}`).setLabel('Cancel Close').setStyle(ButtonStyle.Secondary).setEmoji('↩️'),
+  );
+}
+
+export interface ScheduledClose {
   status: ReportStatus;
   closeAt: number;
   noticeMessageId: string;
+  /** Why the close was scheduled. 'dormant' closes are cancelled by new activity; staff/user ones are not. */
+  origin?: 'dormant' | 'manual';
   attempts?: number;
 }
 
@@ -38,15 +49,29 @@ class CloseScheduler extends ScheduledTimerIndex<ScheduledClose> {
     status: ReportStatus,
     closeAt: number,
     noticeMessageId: string,
+    origin?: 'dormant' | 'manual',
   ): Promise<boolean> {
     let scheduled = false;
     await this.mutate(index => {
       if (index[thread.id]) return;
-      index[thread.id] = { status, closeAt, noticeMessageId };
+      index[thread.id] = { status, closeAt, noticeMessageId, origin };
       scheduled = true;
     });
-    if (scheduled) this.armTimer(thread.id, closeAt);
+    if (scheduled) {
+      this.armTimer(thread.id, closeAt);
+      await thread.messages.fetch(noticeMessageId).then(msg => {
+        const rows = [...msg.components, cancelCloseRow(thread.id)] as typeof msg.components;
+        return msg.edit({ components: rows });
+      }).catch(err => log.warn({ err, threadId: thread.id }, 'Failed to attach Cancel Close button'));
+    }
     return scheduled;
+  }
+
+  // Atomic cancel: racing cancellations can't both act on the same entry.
+  async claimClose(threadId: string): Promise<ScheduledClose | undefined> {
+    const entry = await this.claim(threadId);
+    this.clearTimer(threadId);
+    return entry;
   }
 
   protected async fire(threadId: string): Promise<void> {
@@ -78,17 +103,24 @@ class CloseScheduler extends ScheduledTimerIndex<ScheduledClose> {
       return;
     }
     await this.mutate(index => { delete index[threadId]; });
+    await ch.messages.fetch(entry.noticeMessageId).then(msg =>
+      msg.edit({ components: msg.components.slice(0, -1) })
+    ).catch(err => this.log.warn({ err }, 'Failed to remove Cancel Close button'));
   }
 
   private async stripClosingNotice(thread: ThreadChannel, messageId: string, replaceWith?: number): Promise<void> {
-    if (!messageId) return;
-    const msg = await thread.messages.fetch(messageId).catch(() => null);
-    const embed = msg?.embeds[0];
-    if (!msg || !embed) return;
-    const fields = (embed.fields ?? []).filter(f => !f.value.startsWith(CLOSING_PREFIX));
-    if (replaceWith !== undefined) fields.push(closingNoticeField(replaceWith));
-    await msg.edit({ embeds: [EmbedBuilder.from(embed).setFields(fields)] }).catch(err => this.log.warn({ err }, 'Failed to edit closing notice'));
+    await stripClosingNoticeFrom(thread, messageId, replaceWith);
   }
+}
+
+export async function stripClosingNoticeFrom(thread: ThreadChannel, messageId: string, replaceWith?: number): Promise<void> {
+  if (!messageId) return;
+  const msg = await thread.messages.fetch(messageId).catch(() => null);
+  const embed = msg?.embeds[0];
+  if (!msg || !embed) return;
+  const fields = (embed.fields ?? []).filter(f => !f.value.startsWith(CLOSING_PREFIX));
+  if (replaceWith !== undefined) fields.push(closingNoticeField(replaceWith));
+  await msg.edit({ embeds: [EmbedBuilder.from(embed).setFields(fields)] }).catch(err => log.warn({ err }, 'Failed to edit closing notice'));
 }
 
 const scheduler = new CloseScheduler();
@@ -102,8 +134,13 @@ export async function scheduleClose(
   status: ReportStatus,
   closeAt: number,
   noticeMessageId: string,
+  origin?: 'dormant' | 'manual',
 ): Promise<boolean> {
-  return scheduler.schedule(thread, status, closeAt, noticeMessageId);
+  return scheduler.schedule(thread, status, closeAt, noticeMessageId, origin);
+}
+
+export async function cancelScheduledClose(threadId: string): Promise<ScheduledClose | undefined> {
+  return scheduler.claimClose(threadId);
 }
 
 export function initCloseScheduler(c: Client): void {

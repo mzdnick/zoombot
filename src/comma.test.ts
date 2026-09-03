@@ -162,6 +162,33 @@ describe('computeRouteLogIssues', () => {
     ]);
   });
 
+  it('compresses long consecutive segment runs into ranges', () => {
+    const missing = [];
+    for (let s = 1414; s <= 2155; s++) missing.push(s);
+    const issues = computeRouteLogIssues([{
+      originalText: 'f676264ba0837425/0000004d--ef579ff974/1414/2155',
+      public: true,
+      rlogsAvailable: false,
+      rlogCheck: { mode: 'segment', missing },
+    }]);
+    expect(issues).toEqual([
+      '`f676264ba0837425/0000004d--ef579ff974/1414/2155` is missing logs for segment(s) **1414–2155**. Upload them, then check again.',
+    ]);
+  });
+
+  it('truncates a segment list that is still too long after range compression', () => {
+    const missing = [];
+    for (let i = 0; i < 200; i++) missing.push(i * 2);
+    const issues = computeRouteLogIssues([{
+      originalText: 'abc/def',
+      public: true,
+      rlogsAvailable: false,
+      rlogCheck: { mode: 'segment', missing },
+    }]);
+    expect(issues[0]!.length).toBeLessThan(500);
+    expect(issues[0]).toMatch(/…and more/);
+  });
+
   it('does not flag a segment route when nothing is missing', () => {
     expect(computeRouteLogIssues([{
       originalText: 'abc/def',
