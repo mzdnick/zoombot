@@ -13,7 +13,9 @@ import { getForum, createRouteTrackerThread, addAdditionalRoutesToTracker, encod
 import { StoredReport } from './report-store.js';
 import { isFrozen } from './freeze-state.js';
 import { STATUS_EMOJI, isRateLimit } from './title-sync.js';
+import { PRIORITY_EMOJIS, DEFAULT_BUG_PRIORITY } from './priority.js';
 import type { ExtractedRoute, RouteValidation } from '../../comma.js';
+import { queueVikunjaSync } from '../../integrations/vikunja/sync.js';
 
 const log = createLogger('report-service');
 
@@ -37,6 +39,19 @@ export function resolveTagIds(forum: ForumChannel, names: string[]): string[] {
   return names
     .map(name => forum.availableTags.find(t => t.name === name)?.id)
     .filter((id): id is string => id != null);
+}
+
+/** Returns the forum with the tag present, creating it if missing. Best-effort. */
+export async function ensureForumTag(forum: ForumChannel, name: string): Promise<ForumChannel> {
+  if (forum.availableTags.some(t => t.name === name)) return forum;
+  const updated = await forum.setAvailableTags([
+    ...forum.availableTags.map(t => ({ name: t.name, id: t.id, moderated: t.moderated, emoji: t.emoji ?? undefined })),
+    { name },
+  ]).catch((err: unknown) => {
+    log.warn({ err, name }, 'Failed to create forum tag');
+    return null;
+  });
+  return updated ?? forum;
 }
 
 export function buildActionRow(ticketId: string): ActionRowBuilder<ButtonBuilder> {
@@ -91,19 +106,20 @@ export async function swapForumTags(
   });
 }
 
-export function formatThreadTitle(emoji: string, label: string, title: string | null, ticketId: string | null): string {
+export function formatThreadTitle(emoji: string, label: string, title: string | null, ticketId: string | null, priorityEmoji = ''): string {
   const MAX = 100;
   const suffix = ticketId ? ` (${ticketId})` : '';
+  const priority = priorityEmoji ? `${priorityEmoji} ` : '';
   if (title) {
-    const raw = `${emoji} ${label} - ${title}${suffix}`;
+    const raw = `${emoji} ${priority}${label} - ${title}${suffix}`;
     if (raw.length <= MAX) return raw;
-    const overhead = `${emoji} ${label} - ${suffix}`.length;
+    const overhead = `${emoji} ${priority}${label} - ${suffix}`.length;
     const maxTitleLen = MAX - overhead;
-    if (maxTitleLen <= 1) return ticketId ? `${emoji} ${label} - ${ticketId}` : `${emoji} ${label}`;
+    if (maxTitleLen <= 1) return ticketId ? `${emoji} ${priority}${label} - ${ticketId}` : `${emoji} ${priority}${label}`;
     const truncated = title.slice(0, maxTitleLen - 1) + '\u2026';
-    return `${emoji} ${label} - ${truncated}${suffix}`;
+    return `${emoji} ${priority}${label} - ${truncated}${suffix}`;
   }
-  return ticketId ? `${emoji} ${label} - ${ticketId}` : `${emoji} ${label}`;
+  return ticketId ? `${emoji} ${priority}${label} - ${ticketId}` : `${emoji} ${priority}${label}`;
 }
 
 async function addWikiSuggestions(embed: EmbedBuilder, query: string): Promise<void> {
@@ -174,14 +190,18 @@ export async function submitReport(
     }
 
     const generatedTitle = await params.title.catch(() => null);
-    const tagIds = params.tagNames.length > 0 ? resolveTagIds(forum, params.tagNames) : undefined;
+    // Bug reports default to Priority 3; create the tag on first use if missing.
+    const priority = params.label === 'Bug Report' ? DEFAULT_BUG_PRIORITY : null;
+    const tagForum = priority != null ? await ensureForumTag(forum, `Priority ${priority}`) : forum;
+    const allTagNames = priority != null ? [...params.tagNames, `Priority ${priority}`] : params.tagNames;
+    const tagIds = allTagNames.length > 0 ? resolveTagIds(tagForum, allTagNames) : undefined;
 
     let thread;
     try {
       thread = await forum.threads.create({
         // Ticket id omitted here: adding it would need a post-create rename, spending
         // one of the 2-per-10-min title edits. title-sync folds it in on first status change.
-        name: formatThreadTitle(STATUS_EMOJI['new'], params.label, generatedTitle, null),
+        name: formatThreadTitle(STATUS_EMOJI['new'], params.label, generatedTitle, null, priority != null ? PRIORITY_EMOJIS[priority] : ''),
         message: { content: `<@${params.reporterId}>`, embeds: [params.embed] },
         appliedTags: tagIds,
       });
@@ -200,7 +220,7 @@ export async function submitReport(
       label: params.label,
       threadName: thread.name,
       url: thread.url,
-      tagNames: params.tagNames,
+      tagNames: allTagNames,
       createdTimestamp: thread.createdTimestamp ?? Date.now(),
       lastActivityAt: Date.now(),
     });
@@ -273,6 +293,8 @@ export async function submitReport(
     await starter.pin().catch(err => {
       log.error({ err }, 'Failed to pin starter message');
     });
+    // Vikunja is an optional projection; report submission is already complete.
+    queueVikunjaSync(thread);
   }
 
   const shareRouteId = await getShareRouteCommandId(guild);

@@ -19,6 +19,8 @@ import { initTitleSync } from './report/title-sync.js';
 import { initCloseScheduler } from './report/close-scheduler.js';
 import { initSnoozeScheduler } from './report/snooze-scheduler.js';
 import { initDormantScheduler } from './report/dormant-scheduler.js';
+import { initCommitWatcher } from './report/commit-watcher.js';
+import { initCommitWatches } from './report/uat-wait.js';
 import { recoverFreeze } from './report/freeze-service.js';
 import { getFreeze } from './report/freeze-state.js';
 import { COLORS } from '../util.js';
@@ -138,6 +140,8 @@ export class BotEvents {
     initCloseScheduler(client);
     initSnoozeScheduler(client);
     initDormantScheduler(client);
+    initCommitWatcher();
+    initCommitWatches(client);
 
     const commitHash = getCommitHash();
     if (commitHash) {

@@ -21,3 +21,5 @@ test_*.ts
 AGENTS.md
 .gitignore
 SKILLS-PLAN.md
+
+.npm-cache

@@ -1,5 +1,6 @@
-import type { Client, ThreadChannel } from 'discord.js';
-import { EmbedBuilder } from 'discord.js';
+import type { Client, Message, ThreadChannel } from 'discord.js';
+import { ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType, EmbedBuilder } from 'discord.js';
+import { createLogger } from '../../logger.js';
 import { tryStatusClose, withThreadLock, type ReportStatus } from './title-sync.js';
 import { ScheduledTimerIndex } from './scheduled-timer-index.js';
 
@@ -8,6 +9,22 @@ export const CLOSE_DELAY_MS = 5 * 60 * 1000;
 const MAX_NON_RATE_LIMIT_RETRIES = 5;
 
 const CLOSING_PREFIX = '⏳ Closing ';
+
+const log = createLogger('close-scheduler');
+
+export function cancelCloseRow(threadId: string): ActionRowBuilder<ButtonBuilder> {
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder().setCustomId(`cancel_close_${threadId}`).setLabel('Cancel Close').setStyle(ButtonStyle.Secondary).setEmoji('↩️'),
+  );
+}
+
+/** Returns components without the Cancel Close row, or undefined when there is nothing to strip. */
+export function withoutCancelCloseRow(components: Message['components']): Message['components'] | undefined {
+  const remaining = components.filter(row =>
+    !(row.type === ComponentType.ActionRow && row.components.some(btn => btn.customId?.startsWith('cancel_close_')))
+  );
+  return remaining.length !== components.length ? remaining : undefined;
+}
 
 export interface ScheduledClose {
   status: ReportStatus;
@@ -91,14 +108,20 @@ class CloseScheduler extends ScheduledTimerIndex<ScheduledClose> {
   }
 
   private async stripClosingNotice(thread: ThreadChannel, messageId: string, replaceWith?: number): Promise<void> {
-    if (!messageId) return;
-    const msg = await thread.messages.fetch(messageId).catch(() => null);
-    const embed = msg?.embeds[0];
-    if (!msg || !embed) return;
-    const fields = (embed.fields ?? []).filter(f => !f.value.startsWith(CLOSING_PREFIX));
-    if (replaceWith !== undefined) fields.push(closingNoticeField(replaceWith));
-    await msg.edit({ embeds: [EmbedBuilder.from(embed).setFields(fields)] }).catch(err => this.log.warn({ err }, 'Failed to edit closing notice'));
+    await stripClosingNoticeFrom(thread, messageId, replaceWith);
   }
+}
+
+export async function stripClosingNoticeFrom(thread: ThreadChannel, messageId: string, replaceWith?: number): Promise<void> {
+  if (!messageId) return;
+  const msg = await thread.messages.fetch(messageId).catch(() => null);
+  const embed = msg?.embeds[0];
+  if (!msg || !embed) return;
+  const fields = (embed.fields ?? []).filter(f => !f.value.startsWith(CLOSING_PREFIX));
+  if (replaceWith !== undefined) fields.push(closingNoticeField(replaceWith));
+  const edit: { embeds: [EmbedBuilder]; components?: Message['components'] } = { embeds: [EmbedBuilder.from(embed).setFields(fields)] };
+  if (replaceWith === undefined) edit.components = withoutCancelCloseRow(msg.components) ?? msg.components;
+  await msg.edit(edit).catch(err => log.warn({ err }, 'Failed to edit closing notice'));
 }
 
 const scheduler = new CloseScheduler();

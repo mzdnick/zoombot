@@ -1,11 +1,12 @@
-import type { ButtonComponent, Client, ForumChannel, Guild, Message } from 'discord.js';
-import { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, PermissionFlagsBits } from 'discord.js';
+import type { ButtonComponent, Client, Guild, Message } from 'discord.js';
+import { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, ForumChannel, PermissionFlagsBits } from 'discord.js';
 import { loadConfig } from '../../config.js';
 import { createLogger } from '../../logger.js';
 import { COLORS } from '../../util.js';
 import { StoredReport } from './report-store.js';
 import { getForum } from './route-tracker.js';
 import { extendSnoozesAfterThaw } from './snooze-scheduler.js';
+import { firePendingCommitWaits } from './uat-wait.js';
 import { dormantBumpedAt, getFreeze, saveFreeze, patchFreeze, clearFreeze, type FreezeRecord } from './freeze-state.js';
 
 const log = createLogger('freeze');
@@ -70,9 +71,14 @@ export async function setReportButtonsDisabled(client: Client, disabled: boolean
 
 async function applySendMessagesDeny(forum: ForumChannel, guild: Guild, record: FreezeRecord): Promise<void> {
   // Capture exactly once, before any edit: a crash after the edit must not
-  // snapshot our own deny as the "prior" state.
+  // snapshot our own deny as the "prior" state. getForum returns the cached
+  // channel whose overwrites can predate earlier edits, so read prior state
+  // from a freshly fetched channel; a failed fetch aborts (record already
+  // persisted, boot recovery retries) rather than capturing stale bits.
   if (!record.overwriteCaptured) {
-    const prior = forum.permissionOverwrites.cache.get(guild.id);
+    const fresh = await guild.channels.fetch(forum.id);
+    if (!(fresh instanceof ForumChannel)) return;
+    const prior = fresh.permissionOverwrites.cache.get(guild.id);
     const bit = (flag: bigint) => (prior ? (prior.allow.has(flag) ? true : prior.deny.has(flag) ? false : null) : null);
     const captured = await patchFreeze({
       priorSendMessages: bit(PermissionFlagsBits.SendMessages),
@@ -199,6 +205,9 @@ async function performThaw(client: Client): Promise<void> {
   await clearFreeze();
   await bumpDormancyAfterThaw({ startedAt: record.startedAt, endedAt });
   await extendSnoozesAfterThaw(client, { startedAt: record.startedAt, endedAt });
+  // A commit that landed during the freeze deferred its WaitUser activation.
+  await firePendingCommitWaits().catch(err =>
+    log.warn({ err }, 'Some deferred commit waits failed to fire on thaw; they retry at boot'));
   log.info({ durationMs: endedAt - record.startedAt }, 'Reports thawed');
 }
 

@@ -8,7 +8,7 @@ import { StoredReport } from './report-store.js';
 import { reportNoun } from './report-copy.js';
 import { getForum } from './route-tracker.js';
 import { swapForumTags } from './report-service.js';
-import { scheduleClose, cancelScheduledClose, getScheduledClose, nextCloseAt, closingNoticeField } from './close-scheduler.js';
+import { scheduleClose, cancelScheduledClose, getScheduledClose, nextCloseAt, closingNoticeField, cancelCloseRow, withoutCancelCloseRow } from './close-scheduler.js';
 import { getScheduledSnooze } from './snooze-scheduler.js';
 import { isFrozen } from './freeze-state.js';
 
@@ -111,7 +111,7 @@ async function beginDormantClose(thread: ThreadChannel, dormantDays: number, nou
     .setDescription(`No activity for ${dormantDays} days - this ${noun} will close automatically. Reply here before it closes to keep it open.`)
     .addFields(closingNoticeField(closeAt))
     .setTimestamp();
-  const noticeMsg = await thread.send({ embeds: [notice] }).catch(err => {
+  const noticeMsg = await thread.send({ embeds: [notice], components: [cancelCloseRow(thread.id)] }).catch(err => {
     log.warn({ err, threadId: thread.id }, 'Failed to post dormant-close notice');
     return null;
   });
@@ -124,20 +124,24 @@ async function beginDormantClose(thread: ThreadChannel, dormantDays: number, nou
   return true;
 }
 
-// Only dormant-origin closes are cancelled; staff/user closes stay authoritative.
-async function cancelDormantCloseOnActivity(thread: ThreadChannel): Promise<void> {
+/** Records real human ticket activity, regardless of whether Discord or the web initiated it. */
+export async function recordHumanReportActivity(thread: ThreadChannel): Promise<void> {
+  await StoredReport.update(thread.id, { lastActivityAt: Date.now() });
+
+  // Only dormant-origin closes are cancelled; staff/user closes stay authoritative.
   const entry = await getScheduledClose(thread.id);
   if (!entry || entry.origin !== 'dormant') return;
   const claimed = await cancelScheduledClose(thread.id);
   if (!claimed) return;
-  await StoredReport.update(thread.id, { lastActivityAt: Date.now() });
   if (!claimed.noticeMessageId) return;
   const msg = await thread.messages.fetch(claimed.noticeMessageId).catch(() => null);
   const embed = msg?.embeds[0];
   if (!msg || !embed) return;
   const fields = (embed.fields ?? []).filter(f => !f.value.startsWith('⏳ Closing '));
+  const withoutButton = withoutCancelCloseRow(msg.components);
   await msg.edit({
     embeds: [EmbedBuilder.from(embed).setColor(COLORS.green).setTitle('🔓 Close Cancelled').setFields(fields)],
+    ...(withoutButton ? { components: withoutButton } : {}),
   }).catch(err => log.warn({ err, threadId: thread.id }, 'Failed to finalize cancelled dormant-close notice'));
   log.info({ threadId: thread.id }, 'Dormant close cancelled by new activity');
 }
@@ -170,7 +174,7 @@ export class DormantCloseCancelHandler {
     if (!channel.isThread()) return;
     if (!channel.parentId) return;
     if (channel.parentId !== loadConfig().forumChannelId) return;
-    await cancelDormantCloseOnActivity(channel).catch(err =>
+    await recordHumanReportActivity(channel).catch(err =>
       log.warn({ err, threadId: channel.id }, 'Dormant-close cancel failed'));
   }
 }

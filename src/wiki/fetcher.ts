@@ -1,12 +1,14 @@
 import fs from 'fs';
 import path from 'path';
 import { createLogger } from '../logger.js';
+import { githubFetch } from '../github.js';
 import { type WikiPage } from './types.js';
 
 const log = createLogger('wiki:fetcher');
 
 const DOCS_SUBDIR = 'docs';
 const GITHUB_API = 'https://api.github.com';
+const WIKI_HEADERS = { 'User-Agent': 'starbot', Accept: 'application/vnd.github.v3+json' } as const;
 
 function extractTitle(content: string, filename: string): string {
   const match = content.match(/^#\s+(.+)/m);
@@ -22,18 +24,14 @@ function pageUrl(relativePath: string): string {
 }
 
 async function getTreeSha(repo: string, branch: string): Promise<string> {
-  const res = await fetch(`${GITHUB_API}/repos/${repo}/git/refs/heads/${branch}`, {
-    headers: { 'User-Agent': 'starbot', Accept: 'application/vnd.github.v3+json' },
-  });
+  const res = await githubFetch(`${GITHUB_API}/repos/${repo}/git/refs/heads/${branch}`, WIKI_HEADERS);
   if (!res.ok) throw new Error(`GitHub refs API: ${res.status} ${res.statusText}`);
   const data = (await res.json()) as { object: { sha: string } };
   return data.object.sha;
 }
 
 async function getTree(repo: string, treeSha: string) {
-  const res = await fetch(`${GITHUB_API}/repos/${repo}/git/trees/${treeSha}?recursive=1`, {
-    headers: { 'User-Agent': 'starbot', Accept: 'application/vnd.github.v3+json' },
-  });
+  const res = await githubFetch(`${GITHUB_API}/repos/${repo}/git/trees/${treeSha}?recursive=1`, WIKI_HEADERS);
   if (!res.ok) throw new Error(`GitHub trees API: ${res.status} ${res.statusText}`);
   const data = (await res.json()) as {
     tree: Array<{ path: string; sha: string; type: string; size: number }>;
@@ -44,9 +42,7 @@ async function getTree(repo: string, treeSha: string) {
 }
 
 async function getBlob(repo: string, fileSha: string): Promise<string> {
-  const res = await fetch(`${GITHUB_API}/repos/${repo}/git/blobs/${fileSha}`, {
-    headers: { 'User-Agent': 'starbot', Accept: 'application/vnd.github.v3+json' },
-  });
+  const res = await githubFetch(`${GITHUB_API}/repos/${repo}/git/blobs/${fileSha}`, WIKI_HEADERS);
   if (!res.ok) throw new Error(`GitHub blobs API: ${res.status} ${res.statusText}`);
   const data = (await res.json()) as { content: string; encoding: string };
   if (data.encoding !== 'base64') throw new Error(`Unexpected blob encoding: ${data.encoding}`);

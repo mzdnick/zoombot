@@ -34,5 +34,15 @@
     "tsx": "^4.0.0",
     "typescript": "^6.0.0",
     "vitest": "^4.1.9"
+  },
+  "overrides": {
+    "better-sqlite3": "^13.0.3"
+  },
+  "allowScripts": {
+    "better-sqlite3@^13.0.3": true,
+    "esbuild@0.27.7": true,
+    "onnxruntime-node@1.24.3": true,
+    "protobufjs@7.5.8": true,
+    "sharp@0.34.5": true
   }
 }
