@@ -18,6 +18,7 @@ test_*.ts
 # Agent tooling scratch dirs (ZCode sessions and skills, per-platform agent config)
 .zcode/
 .agents/
+.dashboard/
 AGENTS.md
 .gitignore
 SKILLS-PLAN.md
