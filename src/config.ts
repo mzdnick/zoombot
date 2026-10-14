@@ -32,6 +32,7 @@ export interface BotConfig {
   uatWaitRepo?: string;
   uatWaitBranch?: string;
   uatPollMinutes: number;
+  reportsWaitFlow: boolean;
   openaiEndpoint?: string;
   openaiApiKey?: string;
   openaiModel?: string;
@@ -148,6 +149,8 @@ export function loadConfig(): BotConfig {
   const uatWaitRepo = process.env.REPORTS_UAT_WAIT_REPO;
   const uatWaitBranch = process.env.REPORTS_UAT_WAIT_BRANCH;
   const uatPollMinutes = Math.max(1, parseInt(process.env.REPORTS_UAT_POLL_MINUTES ?? '', 10) || 5);
+  // Request User Testing / fix-in-progress flow. Off removes its entry points.
+  const reportsWaitFlow = !['off', 'false', '0', 'no'].includes((process.env.REPORTS_WAIT_FLOW ?? '').trim().toLowerCase());
 
   const openaiEndpoint = process.env.OPENAI_ENDPOINT;
   const openaiApiKey = process.env.OPENAI_API_KEY;
@@ -179,6 +182,7 @@ export function loadConfig(): BotConfig {
     uatWaitRepo,
     uatWaitBranch,
     uatPollMinutes,
+    reportsWaitFlow,
     openaiEndpoint,
     openaiApiKey,
     openaiModel,

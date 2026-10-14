@@ -75,6 +75,39 @@ describe('wikiBaseUrl parsing', () => {
   });
 });
 
+describe('reportsWaitFlow parsing', () => {
+  beforeEach(() => {
+    for (const v of REQUIRED_VARS) process.env[v] = 'x';
+  });
+
+  afterEach(() => {
+    for (const v of REQUIRED_VARS) {
+      if (saved[v] === undefined) delete process.env[v];
+      else process.env[v] = saved[v];
+    }
+    delete process.env.REPORTS_WAIT_FLOW;
+  });
+
+  it('defaults to enabled when unset or blank', () => {
+    delete process.env.REPORTS_WAIT_FLOW;
+    expect(loadConfig().reportsWaitFlow).toBe(true);
+    process.env.REPORTS_WAIT_FLOW = '';
+    expect(loadConfig().reportsWaitFlow).toBe(true);
+  });
+
+  it('disables on off/false/0/no, case-insensitive', () => {
+    for (const value of ['off', 'False', '0', 'NO', ' no ']) {
+      process.env.REPORTS_WAIT_FLOW = value;
+      expect(loadConfig().reportsWaitFlow).toBe(false);
+    }
+  });
+
+  it('treats any other value as enabled', () => {
+    process.env.REPORTS_WAIT_FLOW = 'on';
+    expect(loadConfig().reportsWaitFlow).toBe(true);
+  });
+});
+
 describe('Vikunja configuration', () => {
   beforeEach(() => {
     for (const v of REQUIRED_VARS) process.env[v] = 'x';
