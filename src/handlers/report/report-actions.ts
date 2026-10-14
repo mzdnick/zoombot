@@ -401,7 +401,7 @@ async function finalizeWaitUser(thread: ThreadChannel, forum: ForumChannel, para
     required = `\n\nThe route must be on commit ${formatGitCommit(params.requiredSha, `github.com/${loadConfig().mainRepo}`)} (${params.branch}${committed ? `, committed ${committed}` : ''}) or newer.`;
   } else if (params.mode === 'newernow' && requiredDate) {
     const committed = discordTimestamp(requiredDate);
-    required = `\n\nThe route must be on a commit newer than the latest one${committed ? ` as of ${committed}` : ''}. An update will be pushed to the testing branch \`Dom\` shortly - see the [branch switching guide](https://wiki.firestar.link/software/starpilot/#changing-branches) to switch to it.`;
+    required = `\n\nThe route must be on a commit newer than the latest one${committed ? ` as of ${committed}` : ''}. An update will be pushed to the testing branch \`Dom\` shortly - see the [branch switching guide](${loadConfig().wikiBaseUrl}software/starpilot/#changing-branches) to switch to it.`;
   }
 
   const embed = new EmbedBuilder()
@@ -471,7 +471,7 @@ async function finalizeFixIncoming(thread: ThreadChannel, forum: ForumChannel, p
   const description =
     `${params.message ? params.message + '\n\n' : ''}` +
     `The developers are working on your ${reportNoun(label)}. The fix will land in the next batch of commits pushed to the \`${uatWaitBranch}\` branch of \`${repo}\`.` +
-    `\n\nThis thread will update automatically once it's ready. You'll then update your local install - see [Using Galaxy (recommended)](https://wiki.firestar.link/software/starpilot/#using-galaxy-recommended).` +
+    `\n\nThis thread will update automatically once it's ready. You'll then update your local install - see [Using Galaxy (recommended)](${loadConfig().wikiBaseUrl}software/starpilot/#using-galaxy-recommended).` +
     `\n(no @pings please)`;
 
   const sent = await thread.send({

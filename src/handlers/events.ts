@@ -119,7 +119,7 @@ export class BotEvents {
       log.info('Wiki disabled (WIKI_REPO unset)');
       setInitFailed();
     } else try {
-      const wikiPages = await fetchWikiPages(config.wikiRepo, config.wikiCacheDir);
+      const wikiPages = await fetchWikiPages(config.wikiRepo, config.wikiCacheDir, config.wikiBaseUrl);
       if (wikiPages.length > 0) {
         const idx = await buildIndex(wikiPages, config.wikiCacheDir);
         setIndex(idx);

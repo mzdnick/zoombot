@@ -16,11 +16,11 @@ function extractTitle(content: string, filename: string): string {
   return filename.replace(/\.md$/, '').replace(/[-_]/g, ' ');
 }
 
-function pageUrl(relativePath: string): string {
+function pageUrl(relativePath: string, baseUrl: string): string {
   const withoutExt = relativePath.replace(/\.md$/, '');
   const cleaned = withoutExt.replace(/\/?index$/, '');
   const suffix = cleaned ? `${cleaned}/` : '';
-  return `https://wiki.firestar.link/${suffix}`;
+  return `${baseUrl}${suffix}`;
 }
 
 async function getTreeSha(repo: string, branch: string): Promise<string> {
@@ -52,6 +52,7 @@ async function getBlob(repo: string, fileSha: string): Promise<string> {
 export async function fetchWikiPages(
   repo: string,
   cacheDir: string,
+  baseUrl: string,
   branch: string = 'main',
 ): Promise<WikiPage[]> {
   fs.mkdirSync(cacheDir, { recursive: true });
@@ -61,17 +62,19 @@ export async function fetchWikiPages(
 
   const currentSha = await getTreeSha(repo, branch);
 
-  let cachedSha: string | undefined;
+  let cached: { sha?: string; baseUrl?: string } | undefined;
   try {
-    cachedSha = (JSON.parse(fs.readFileSync(treeShaPath, 'utf-8')) as { sha: string }).sha;
+    cached = JSON.parse(fs.readFileSync(treeShaPath, 'utf-8'));
   } catch {}
 
-  if (cachedSha === currentSha) {
+  // The page cache is only valid when both the tree and the link base are
+  // unchanged, so flipping WIKI_BASE_URL re-fetches instead of serving old URLs.
+  if (cached?.sha === currentSha && cached?.baseUrl === baseUrl) {
     try {
-      const cached = JSON.parse(fs.readFileSync(pagesPath, 'utf-8')) as WikiPage[];
-      if (cached.length > 0) {
-        log.info(`Wiki loaded from cache (${cached.length} pages)`);
-        return cached;
+      const cachedPages = JSON.parse(fs.readFileSync(pagesPath, 'utf-8')) as WikiPage[];
+      if (cachedPages.length > 0) {
+        log.info(`Wiki loaded from cache (${cachedPages.length} pages)`);
+        return cachedPages;
       }
     } catch {}
   }
@@ -89,11 +92,11 @@ export async function fetchWikiPages(
       title: extractTitle(content, path.basename(relPath)),
       content,
       path: relPath,
-      url: pageUrl(relPath),
+      url: pageUrl(relPath, baseUrl),
     });
   }
 
-  fs.writeFileSync(treeShaPath, JSON.stringify({ sha: currentSha }), 'utf-8');
+  fs.writeFileSync(treeShaPath, JSON.stringify({ sha: currentSha, baseUrl }), 'utf-8');
   fs.writeFileSync(pagesPath, JSON.stringify(pages), 'utf-8');
   log.info(`Wiki fetched from GitHub (${pages.length} pages)`);
 

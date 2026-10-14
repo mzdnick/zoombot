@@ -26,6 +26,7 @@ export interface BotConfig {
   scholarRole?: string;
   wikiRepo: string;
   wikiCacheDir: string;
+  wikiBaseUrl: string;
   mainRepo: string;
   githubToken?: string;
   uatWaitRepo?: string;
@@ -136,6 +137,9 @@ export function loadConfig(): BotConfig {
   // init guard in src/handlers/events.ts checks for it before fetching.
   const wikiRepo = process.env.WIKI_REPO || 'n/a';
   const wikiCacheDir = process.env.WIKI_CACHE_DIR || 'data/wiki';
+  // Public site wiki links point at. Defaults to upstream's wiki; a
+  // deployment with its own wiki sets WIKI_BASE_URL instead.
+  const wikiBaseUrl = `${(process.env.WIKI_BASE_URL || 'https://wiki.firestar.link').trim().replace(/\/+$/, '')}/`;
 
   const mainRepo = process.env.MAIN_REPO || 'zoompilot/zoompilot';
 
@@ -169,6 +173,7 @@ export function loadConfig(): BotConfig {
     scholarRole,
     wikiRepo,
     wikiCacheDir,
+    wikiBaseUrl,
     mainRepo,
     githubToken,
     uatWaitRepo,

@@ -49,6 +49,32 @@ describe('maxActiveReports parsing', () => {
   });
 });
 
+describe('wikiBaseUrl parsing', () => {
+  beforeEach(() => {
+    for (const v of REQUIRED_VARS) process.env[v] = 'x';
+  });
+
+  afterEach(() => {
+    for (const v of REQUIRED_VARS) {
+      if (saved[v] === undefined) delete process.env[v];
+      else process.env[v] = saved[v];
+    }
+    delete process.env.WIKI_BASE_URL;
+  });
+
+  it('defaults to the upstream wiki when unset', () => {
+    delete process.env.WIKI_BASE_URL;
+    expect(loadConfig().wikiBaseUrl).toBe('https://wiki.firestar.link/');
+  });
+
+  it('keeps exactly one trailing slash', () => {
+    process.env.WIKI_BASE_URL = 'https://wiki.zoompilot.ai';
+    expect(loadConfig().wikiBaseUrl).toBe('https://wiki.zoompilot.ai/');
+    process.env.WIKI_BASE_URL = 'https://wiki.zoompilot.ai///';
+    expect(loadConfig().wikiBaseUrl).toBe('https://wiki.zoompilot.ai/');
+  });
+});
+
 describe('Vikunja configuration', () => {
   beforeEach(() => {
     for (const v of REQUIRED_VARS) process.env[v] = 'x';
