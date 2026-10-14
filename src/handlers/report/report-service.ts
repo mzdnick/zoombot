@@ -63,6 +63,11 @@ export function buildActionRow(ticketId: string): ActionRowBuilder<ButtonBuilder
       .setStyle(ButtonStyle.Secondary)
       .setEmoji('📝'),
     new ButtonBuilder()
+      .setCustomId(`resolve_${ticketId}`)
+      .setLabel('Mark Complete')
+      .setStyle(ButtonStyle.Success)
+      .setEmoji('✅'),
+    new ButtonBuilder()
       .setCustomId(`staff_actions_${ticketId}`)
       .setLabel('Staff Actions')
       .setStyle(ButtonStyle.Primary)

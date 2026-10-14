@@ -154,6 +154,7 @@ export async function setReportAssignee(
 }
 
 const RENAME_OPTION = { label: 'Rename Thread', value: 'rename', emoji: '✏️', description: "Change this report thread's title" };
+const WAIT_USER_OPTION = { label: 'Request User Testing', value: 'waituser', emoji: '🧪', description: 'Ask the user to test and report back' };
 
 function buildStaffActionsReply(ticketId: string, renameOnly = false) {
   const select = new StringSelectMenuBuilder()
@@ -162,7 +163,7 @@ function buildStaffActionsReply(ticketId: string, renameOnly = false) {
     .addOptions(
       ...(renameOnly ? [RENAME_OPTION] : [
         { label: 'Assign', value: 'assign', emoji: '👤', description: 'Assign a staff member to this report' },
-        { label: 'Request User Testing', value: 'waituser', emoji: '🧪', description: 'Ask the user to test and report back' },
+        ...(loadConfig().reportsWaitFlow ? [WAIT_USER_OPTION] : []),
         { label: 'Merge', value: 'merge', emoji: '🔀', description: 'Merge this report into another thread' },
         { label: 'Set Priority', value: 'priority', emoji: '🚦', description: 'Reclassify or remove the priority (0 = highest, 5 = lowest)' },
         RENAME_OPTION,
@@ -330,6 +331,7 @@ interface WaitUserParams {
 const WAITING_FOR_USER_TITLE = '🧪 Waiting for User';
 export const FIX_INCOMING_TITLE = '🔧 Fix In Progress';
 const IN_PROGRESS_TAG = 'IN PROGRESS';
+const RESOLVED_TAG = 'RESOLVED';
 
 function isStaleWaitEmbed(m: Message, botId?: string): boolean {
   if (botId && m.author.id !== botId) return false;
@@ -973,6 +975,56 @@ export class BotReportActions {
     await interaction.showModal(buildAdditionalReportModal(`additional_report_modal_${interaction.id}`));
   }
 
+  @ButtonComponent({ id: /^resolve_/ })
+  async markComplete(interaction: ButtonInteraction) {
+    if (await rejectIfFrozen(interaction)) return;
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+    const guild = interaction.guild;
+    const thread = interaction.channel?.isThread() ? interaction.channel : null;
+    if (!guild || !thread) {
+      await interaction.editReply({ content: 'This can only be used from a report thread.' });
+      return;
+    }
+    if (thread.archived || thread.locked) {
+      await interaction.editReply({ content: 'This report is already closed.' });
+      return;
+    }
+
+    // Reporter-only; an unresolvable submitter falls back to ungated, like the Ready button.
+    const submitterId = await resolveSubmitterId(thread, guild);
+    if (submitterId && interaction.user.id !== submitterId) {
+      await interaction.editReply({ content: 'Only the person who submitted this report can mark it complete.' });
+      return;
+    }
+
+    const forum = await getForum(guild, loadConfig().forumChannelId);
+    if (!forum) {
+      await interaction.editReply({ content: 'Could not resolve the report forum. Please try again later.' });
+      return;
+    }
+    const tagged = await ensureForumTag(forum, RESOLVED_TAG);
+    const resolvedIds = resolveTagIds(tagged, [RESOLVED_TAG]);
+    if (resolvedIds.some(id => thread.appliedTags.includes(id))) {
+      await interaction.editReply({ content: 'This report is already marked complete.' });
+      return;
+    }
+
+    await swapForumTags(thread, tagged, { remove: ['OPEN'], add: [RESOLVED_TAG] })
+      .catch(err => log.warn({ err, threadId: thread.id }, 'Failed to swap forum tags for user resolve'));
+
+    const label = await labelForThread(thread.id, thread.name);
+    await thread.send({
+      embeds: [new EmbedBuilder()
+        .setColor(COLORS.green)
+        .setTitle('✅ Marked Complete')
+        .setDescription(`<@${interaction.user.id}> marked this ${reportNoun(label)} as resolved. Staff will review and close it.`)
+        .setTimestamp()],
+    });
+    await StoredReport.syncFromThread(thread);
+    await interaction.editReply({ content: 'Marked complete - thanks!' });
+  }
+
   @ButtonComponent({ id: /^archk_/ })
   @ButtonComponent({ id: /^arfrc_/ })
   async additionalReportGate(interaction: ButtonInteraction) {
@@ -1457,6 +1509,12 @@ export class BotReportActions {
     const [action] = interaction.values;
     if (!['assign', 'close', 'merge', 'waituser', 'snooze', 'rename', 'priority'].includes(action)) {
       await interaction.reply({ content: 'Invalid action.', flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    // Covers select menus saved in older messages before REPORTS_WAIT_FLOW=off.
+    if (action === 'waituser' && !loadConfig().reportsWaitFlow) {
+      await interaction.reply({ content: 'Request User Testing is disabled in this deployment.', flags: MessageFlags.Ephemeral });
       return;
     }
 
@@ -2202,6 +2260,10 @@ export class BotReportStaffContextMenus {
   @ContextMenu({ name: 'Request User Testing', type: ApplicationCommandType.Message, defaultMemberPermissions: PermissionFlagsBits.ManageThreads })
   @Guild(guildId)
   async waitUserContext(interaction: MessageContextMenuCommandInteraction) {
+    if (!loadConfig().reportsWaitFlow) {
+      await interaction.reply({ content: 'Request User Testing is disabled in this deployment.', flags: MessageFlags.Ephemeral });
+      return;
+    }
     const ctx = await resolveStaffActionContext(interaction);
     if (!ctx) return;
     await interaction.showModal(buildWaitUserModal(ctx.ticketId));
