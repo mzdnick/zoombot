@@ -48,6 +48,7 @@ import { titleGenerator } from './title-generator.js';
 import { konikViewerUrl } from '../../konik.js';
 import { getScheduledSnooze } from './snooze-scheduler.js';
 import { StoredReport } from './report-store.js';
+import { activeCapMessage, checkActiveCap } from './active-cap.js';
 import { getFreeze } from './freeze-state.js';
 import {
   CATEGORY_ORDER,
@@ -108,13 +109,10 @@ function reporterFromModalId(interaction: ModalSubmitInteraction): string {
 // so it stays well inside the undeferred showModal window. submitReport
 // re-checks authoritatively under the creation lock.
 async function ensureWithinActiveLimit(interaction: ButtonInteraction): Promise<boolean> {
-  const limit = loadConfig().maxActiveReports;
-  if (limit <= 0) return true;
-  const active = await StoredReport.activeForUser(interaction.user.id);
-  if (active.length < limit) return true;
-  const lines = active.map(r => `- [${r.data.threadName}](${r.url})`).join('\n');
+  const { allowed, active } = await checkActiveCap(interaction.user.id);
+  if (allowed) return true;
   await interaction.reply({
-    content: `You can only have **${limit}** active report thread(s) at a time. Please wait until one of yours is resolved, or add to an existing thread instead:\n${lines}`,
+    content: activeCapMessage(loadConfig().maxActiveReports, active),
     flags: MessageFlags.Ephemeral,
   });
   return false;

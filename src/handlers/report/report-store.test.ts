@@ -78,6 +78,20 @@ describe('StoredReport', () => {
     expect(again?.data.tagNames).toEqual(['CLOSED']);
   });
 
+  it('forget removes the report from lookups and both indexes', async () => {
+    await StoredReport.record(data({ threadId: 'a' }));
+    await StoredReport.record(data({ threadId: 'b' }));
+    expect(await StoredReport.forget('a')).toBe(true);
+    expect(await StoredReport.get('a')).toBeNull();
+    expect((await StoredReport.forUser('user-1')).map(r => r.threadId)).toEqual(['b']);
+    expect((await StoredReport.listAll()).map(r => r.threadId)).toEqual(['b']);
+    expect((await StoredReport.activeForUser('user-1')).map(r => r.threadId)).toEqual(['b']);
+  });
+
+  it('forget on an unknown thread is a no-op', async () => {
+    expect(await StoredReport.forget('nope')).toBe(false);
+  });
+
   it('syncFromThread refreshes live-derived fields without touching immutable facts', async () => {
     await StoredReport.record(data({}));
     const thread = {

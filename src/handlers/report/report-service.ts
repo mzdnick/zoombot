@@ -11,6 +11,7 @@ import { getIndex } from '../../wiki/wiki.js';
 import { searchWiki, formatWikiResults } from '../../wiki/searcher.js';
 import { getForum, createRouteTrackerThread, addAdditionalRoutesToTracker, encodeConfirmCustomId, buildConfirmRows, TRACKER_FIELD_PREFIX } from './route-tracker.js';
 import { StoredReport } from './report-store.js';
+import { activeCapMessage, checkActiveCap } from './active-cap.js';
 import { isFrozen } from './freeze-state.js';
 import { STATUS_EMOJI, isRateLimit } from './title-sync.js';
 import { PRIORITY_EMOJIS, DEFAULT_BUG_PRIORITY } from './priority.js';
@@ -178,11 +179,10 @@ export async function submitReport(
   // One closure so the gated path can hold the creation lock across check→create→record.
   const createThread = async (): Promise<{ thread: ThreadChannel; ticketId: string } | null> => {
     if (gated) {
-      const active = await StoredReport.activeForUser(params.reporterId);
-      if (active.length >= limit) {
-        const lines = active.map(r => `- [${r.data.threadName}](${r.url})`).join('\n');
+      const { allowed, active } = await checkActiveCap(params.reporterId);
+      if (!allowed) {
         await interaction.editReply({
-          content: `You can only have **${limit}** active report thread(s) at a time. Please wait until one of yours is resolved, or add to an existing thread instead:\n${lines}`,
+          content: activeCapMessage(limit, active),
           components: [],
         });
         return null;

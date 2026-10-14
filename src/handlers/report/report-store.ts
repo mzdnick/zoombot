@@ -156,6 +156,23 @@ export class StoredReport {
     const tagNames = [...new Set([...existing.data.tagNames.filter(t => t !== 'OPEN' && t !== 'WAITING FOR DEV' && t !== 'WAITING FOR USER'), 'CLOSED'])];
     return StoredReport.update(threadId, { tagNames });
   }
+
+  /** Delete hook: drops the report and its index entries once the thread no longer exists. */
+  static async forget(threadId: string): Promise<boolean> {
+    const existing = await reportStore.get(threadId);
+    if (!existing) return false;
+    await reportStore.delete(threadId);
+    const run = indexChain.then(async () => {
+      const ids = (await userIndexStore.get(existing.reporterId)) ?? [];
+      await userIndexStore.set(existing.reporterId, ids.filter(id => id !== threadId));
+      const all = (await reportIndexStore.get(INDEX_KEY)) ?? [];
+      await reportIndexStore.set(INDEX_KEY, all.filter(id => id !== threadId));
+    });
+    indexChain = run.then(() => undefined, () => undefined);
+    await run;
+    log.info({ threadId, reporterId: existing.reporterId }, 'Report forgotten');
+    return true;
+  }
 }
 
 // parent may be uncached when the thread was fetched by id; stale tags would
