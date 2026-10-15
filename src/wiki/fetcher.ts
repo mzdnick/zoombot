@@ -93,11 +93,15 @@ export async function fetchWikiPages(
       content,
       path: relPath,
       url: pageUrl(relPath, baseUrl),
+      sha: file.sha,
     });
   }
 
-  fs.writeFileSync(treeShaPath, JSON.stringify({ sha: currentSha, baseUrl }), 'utf-8');
+  // Pages are written before the tree sha. The sha file is the commit marker:
+  // a crash mid-write leaves the old sha behind, so the next boot re-fetches
+  // instead of pairing a fresh sha with stale pages.
   fs.writeFileSync(pagesPath, JSON.stringify(pages), 'utf-8');
+  fs.writeFileSync(treeShaPath, JSON.stringify({ sha: currentSha, baseUrl }), 'utf-8');
   log.info(`Wiki fetched from GitHub (${pages.length} pages)`);
 
   return pages;

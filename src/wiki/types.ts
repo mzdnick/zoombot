@@ -3,6 +3,8 @@ export interface WikiPage {
   content: string;
   path: string;
   url: string;
+  /** Git blob sha of the source file; the embedding-cache invalidation key. */
+  sha: string;
 }
 
 export interface WikiChunk {
