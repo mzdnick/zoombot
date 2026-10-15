@@ -48,7 +48,16 @@ process.on('unhandledRejection', (err) => {
   shutdown();
 });
 
+const TRANSIENT_NETWORK_CODES = new Set(['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE', 'EAI_AGAIN', 'ENOTFOUND', 'EHOSTUNREACH']);
+
 process.on('uncaughtException', (err) => {
+  // A dropped socket escaping an unrelated library's callbacks must not take
+  // the bot down; the affected request just fails and the next one succeeds.
+  const code = (err as NodeJS.ErrnoException).code;
+  if ((code && TRANSIENT_NETWORK_CODES.has(code)) || /socket hang up|socket disconnected/i.test(err.message)) {
+    log.error({ err }, 'Transient network error (non-fatal)');
+    return;
+  }
   log.fatal({ err }, 'Uncaught exception');
   shutdown();
 });

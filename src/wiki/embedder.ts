@@ -1,4 +1,11 @@
-import { pipeline } from '@huggingface/transformers';
+import { pipeline, env } from '@huggingface/transformers';
+import { createLogger } from '../logger.js';
+
+const log = createLogger('wiki:embedder');
+
+// Weights live on the compose volume (../files/data) so container recreation
+// does not re-download the model from huggingface.co.
+env.cacheDir = 'data/hf-models';
 
 interface EmbeddingResult {
   dims: number[];
@@ -16,12 +23,26 @@ interface EmbeddingPipeline {
 
 let pipe: EmbeddingPipeline | null = null;
 
+const LOAD_ATTEMPTS = 3;
+
+async function loadPipe(): Promise<EmbeddingPipeline> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      // q8 weights (~25MB) instead of the fp32 default (~130MB); accuracy loss
+      // is negligible for wiki search and the smaller footprint keeps small
+      // hosts from being OOM-killed during index builds.
+      return await pipeline('feature-extraction', 'Xenova/bge-small-en-v1.5', { dtype: 'q8' }) as unknown as EmbeddingPipeline;
+    } catch (err) {
+      if (attempt >= LOAD_ATTEMPTS) throw err;
+      log.warn({ err, attempt }, 'Model load failed; retrying');
+      await new Promise(resolve => setTimeout(resolve, attempt * 10_000));
+    }
+  }
+}
+
 async function getPipe(): Promise<EmbeddingPipeline> {
   if (!pipe) {
-    // q8 weights (~25MB) instead of the fp32 default (~130MB); accuracy loss
-    // is negligible for wiki search and the smaller footprint keeps small
-    // hosts from being OOM-killed during index builds.
-    pipe = await pipeline('feature-extraction', 'Xenova/bge-small-en-v1.5', { dtype: 'q8' }) as unknown as EmbeddingPipeline;
+    pipe = await loadPipe();
   }
   return pipe;
 }
