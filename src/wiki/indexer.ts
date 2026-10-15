@@ -4,11 +4,14 @@ import MiniSearch from 'minisearch';
 import { type WikiChunk, type WikiPage } from './types.js';
 import { embedBatch } from './embedder.js';
 import { chunkTextByTokens } from './chunker.js';
+import { createLogger } from '../logger.js';
+
+const log = createLogger('wiki:indexer');
 
 const INDEX_CHUNK_TOKENS = 512;
 const INDEX_CHUNK_OVERLAP = 64;
 
-const CACHE_VERSION = 7;
+const CACHE_VERSION = 8;
 
 // Float16 / Float32 conversion for embedding storage (halves memory).
 function float32ToFloat16(f32: number[]): number[] {
@@ -38,7 +41,7 @@ function cachePath(base: string): string {
 
 interface CachedChunk {
   path: string;
-  mtime: number;
+  sha: string;
   contentEmbedding: number[];
   isFloat16: boolean;
 }
@@ -49,22 +52,21 @@ interface CacheData {
   chunks: CachedChunk[];
 }
 
-function getMtime(cacheDir: string, filePath: string): number {
-  try {
-    return fs.statSync(path.join(cacheDir, filePath)).mtimeMs;
-  } catch {
-    return 0;
-  }
-}
-
 function loadCache(cacheDir: string): CacheData | null {
   const cp = cachePath(cacheDir);
+  let raw: string;
   try {
-    const raw = fs.readFileSync(cp, 'utf-8');
+    raw = fs.readFileSync(cp, 'utf-8');
+  } catch {
+    return null; // No cache yet; first build.
+  }
+  try {
     const data = JSON.parse(raw) as CacheData;
     if (data.version === CACHE_VERSION) return data;
-  } catch {
-    // ignore
+  } catch (err) {
+    // A truncated write used to be swallowed silently; log it so a recurring
+    // corruption is visible instead of looking like a routine cold start.
+    log.warn({ err }, 'Wiki embedding cache unreadable; rebuilding embeddings');
   }
   return null;
 }
@@ -80,7 +82,11 @@ function saveCache(cacheDir: string, cachedMap: Map<string, CachedChunk>, float1
     chunks: [...cachedMap.values()],
   };
 
-  fs.writeFileSync(cp, JSON.stringify(data), 'utf-8');
+  // Write to a temp file and rename, so a crash mid-write cannot leave a
+  // truncated JSON file behind at the real path.
+  const tmp = `${cp}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(data), 'utf-8');
+  fs.renameSync(tmp, cp);
 }
 
 export interface WikiIndex {
@@ -104,10 +110,6 @@ export async function buildIndex(wikiPages: WikiPage[], cacheDir: string): Promi
   const chunkMap = new Map<string, WikiChunk>();
   const docs: Array<{ path: string; title: string; content: string; parentPath: string }> = [];
 
-  // Chunk every page for passage-level retrieval.
-  const pageMtimes = new Map<string, number>();
-  for (const p of wikiPages) pageMtimes.set(p.path, getMtime(cacheDir, p.path));
-
   for (const p of wikiPages) {
     const contentChunks = await chunkTextByTokens(p.content, INDEX_CHUNK_TOKENS, INDEX_CHUNK_OVERLAP);
 
@@ -129,16 +131,17 @@ export async function buildIndex(wikiPages: WikiPage[], cacheDir: string): Promi
 
   miniSearch.addAll(docs);
 
-  // Cache passage embeddings (invalidated on parent-page mtime).
+  // Cache passage embeddings. Freshness is keyed on the parent page's git
+  // blob sha, so an edited page re-embeds and an unchanged page never does.
   const cache = loadCache(cacheDir);
   const cachedMap = new Map<string, CachedChunk>();
   if (cache) for (const c of cache.chunks) cachedMap.set(c.path, c);
 
   const staleChunks: WikiChunk[] = [];
   for (const chunk of chunkMap.values()) {
-    const mtime = pageMtimes.get(chunk.parentPath) ?? 0;
+    const pageSha = parentPageMap.get(chunk.parentPath)?.sha ?? '';
     const cached = cachedMap.get(chunk.path);
-    if (!cached || cached.mtime !== mtime) staleChunks.push(chunk);
+    if (!cached || cached.sha !== pageSha) staleChunks.push(chunk);
   }
 
   if (staleChunks.length > 0) {
@@ -148,12 +151,12 @@ export async function buildIndex(wikiPages: WikiPage[], cacheDir: string): Promi
     // Store embeddings as Float16 to halve memory usage.
     for (let i = 0; i < staleChunks.length; i++) {
       const c = staleChunks[i];
-      const mtime = pageMtimes.get(c.parentPath) ?? 0;
+      const pageSha = parentPageMap.get(c.parentPath)?.sha ?? '';
       const float16Data = float32ToFloat16(contentEmbeddings[i]);
 
       cachedMap.set(c.path, {
         path: c.path,
-        mtime,
+        sha: pageSha,
         contentEmbedding: float16Data,
         isFloat16: true,
       });
