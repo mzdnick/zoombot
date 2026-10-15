@@ -60,8 +60,12 @@ export class BotIdentification {
     const year = interaction.fields.getTextInputValue('identity_year');
     const model = interaction.fields.getTextInputValue('identity_model');
 
+    // Nickname + role changes are three REST calls. Defer first so a slow host
+    // still answers inside the 3-second interaction window (10062 otherwise).
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
     if (!/^\d{4}$/.test(year)) {
-      await interaction.reply({ content: 'Please enter a valid 4-digit year.', flags: MessageFlags.Ephemeral });
+      await interaction.editReply({ content: 'Please enter a valid 4-digit year.' });
       return;
     }
 
@@ -73,16 +77,15 @@ export class BotIdentification {
     }
 
     if (!(interaction.member instanceof GuildMember)) {
-      await interaction.reply({ content: 'Could not identify your member record.', flags: MessageFlags.Ephemeral });
+      await interaction.editReply({ content: 'Could not identify your member record.' });
       return;
     }
 
     try {
       await interaction.member.setNickname(nickname);
     } catch {
-      await interaction.reply({
+      await interaction.editReply({
         content: 'Failed to set nickname. Make sure the bot has **Manage Nicknames** permission and its role is above yours in the server settings.',
-        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -91,9 +94,8 @@ export class BotIdentification {
       await interaction.member.roles.add(config.verifiedRole);
     } catch (err) {
       log.error({ err }, 'Failed to assign verified role');
-      await interaction.reply({
+      await interaction.editReply({
         content: `Nickname set to **${nickname}**, but I couldn't assign the verified role. Make sure the bot has **Manage Roles** permission and its role is above yours.`,
-        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -104,6 +106,6 @@ export class BotIdentification {
       log.error({ err }, 'Failed to remove pending role');
     }
 
-    await interaction.reply({ content: `Nickname set to **${nickname}**`, flags: MessageFlags.Ephemeral });
+    await interaction.editReply({ content: `Nickname set to **${nickname}**` });
   }
 }
