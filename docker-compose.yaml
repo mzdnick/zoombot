@@ -11,3 +11,12 @@ services:
       - ./.git:/app/.git:ro
     environment:
       - NODE_ENV=production
+    # 1GB host: cap the container so an onnxruntime allocation spike kills
+    # (and restarts) the bot instead of the host. Tune down if the host still
+    # swaps; the embedder caps in src/wiki/embedder.ts keep the bot under this.
+    mem_limit: 700m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
