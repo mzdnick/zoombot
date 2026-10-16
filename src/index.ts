@@ -36,25 +36,37 @@ function shutdown() {
   process.exit(0);
 }
 
+const TRANSIENT_NETWORK_CODES = new Set(['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE', 'EAI_AGAIN', 'ENOTFOUND', 'EHOSTUNREACH']);
+
+// A dropped socket, or a request REST aborted after its timeout (an
+// AbortError/TimeoutError DOMException), must not take the bot down. The
+// affected request just fails and the next one succeeds.
+function isTransientNetworkError(err: unknown): boolean {
+  const e = err as NodeJS.ErrnoException;
+  if (e?.code && TRANSIENT_NETWORK_CODES.has(e.code)) return true;
+  if (/socket hang up|socket disconnected/i.test(e?.message ?? '')) return true;
+  return e?.name === 'AbortError' || e?.name === 'TimeoutError';
+}
+
 process.on('unhandledRejection', (err) => {
   // A DiscordAPIError is almost always a single bad request (expired interaction,
   // invalid form body, missing perms) - log it and keep running rather than letting
-  // one interaction take the whole bot down. Anything else is treated as fatal.
+  // one interaction take the whole bot down. Transient network failures are the
+  // same class. Anything else is treated as fatal.
   if (err instanceof DiscordAPIError) {
     log.error({ err }, 'Unhandled DiscordAPIError (non-fatal)');
+    return;
+  }
+  if (isTransientNetworkError(err)) {
+    log.error({ err }, 'Transient network error (non-fatal)');
     return;
   }
   log.fatal({ err }, 'Unhandled rejection');
   shutdown();
 });
 
-const TRANSIENT_NETWORK_CODES = new Set(['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE', 'EAI_AGAIN', 'ENOTFOUND', 'EHOSTUNREACH']);
-
 process.on('uncaughtException', (err) => {
-  // A dropped socket escaping an unrelated library's callbacks must not take
-  // the bot down; the affected request just fails and the next one succeeds.
-  const code = (err as NodeJS.ErrnoException).code;
-  if ((code && TRANSIENT_NETWORK_CODES.has(code)) || /socket hang up|socket disconnected/i.test(err.message)) {
+  if (isTransientNetworkError(err)) {
     log.error({ err }, 'Transient network error (non-fatal)');
     return;
   }
