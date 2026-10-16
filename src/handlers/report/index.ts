@@ -12,6 +12,7 @@ import {
   TextInputBuilder,
   TextInputStyle,
   LabelBuilder,
+  TextDisplayBuilder,
   EmbedBuilder,
   MessageFlags,
   PermissionFlagsBits,
@@ -71,9 +72,7 @@ function rlogFailureMessage(check: RlogCheckResult): string {
 
 interface BugReportInput {
   routeIdInput: string;
-  observed: string;
-  expected: string;
-  reproIntent: string;
+  description: string;
 }
 
 interface PendingBugReport extends BugReportInput {
@@ -331,35 +330,21 @@ async function showBugModal(interaction: ButtonInteraction, onBehalfOf?: string)
   });
   modal.addLabelComponents(new LabelBuilder().setLabel('Route ID').setDescription('Visible only to server admins').setTextInputComponent(routeIdInput));
 
-  const observedInput = new TextInputBuilder({
-    custom_id: 'observed',
-    style: TextInputStyle.Paragraph,
-    placeholder: 'What happened?',
-    required: true,
-    min_length: 10,
-    max_length: 1024,
-  });
-  modal.addLabelComponents(new LabelBuilder().setLabel('Observed Behavior').setTextInputComponent(observedInput));
+  modal.addTextDisplayComponents(
+    new TextDisplayBuilder().setContent(
+      'Please describe the issue. Include behavior observed, behavior expected, any steps used to reproduce the issue, and other relevant details.',
+    ),
+  );
 
-  const expectedInput = new TextInputBuilder({
-    custom_id: 'expected',
+  const descriptionInput = new TextInputBuilder({
+    custom_id: 'description',
     style: TextInputStyle.Paragraph,
-    placeholder: 'What should have happened?',
+    placeholder: 'What happened, what you expected, steps to reproduce, other details',
     required: true,
     min_length: 10,
     max_length: 1024,
   });
-  modal.addLabelComponents(new LabelBuilder().setLabel('Expected Behavior').setTextInputComponent(expectedInput));
-
-  const reproIntentInput = new TextInputBuilder({
-    custom_id: 'reproducibility_intent',
-    style: TextInputStyle.Paragraph,
-    placeholder: 'Can you reproduce it? What is your ideal outcome? Any additional details?',
-    required: true,
-    min_length: 10,
-    max_length: 1024,
-  });
-  modal.addLabelComponents(new LabelBuilder().setLabel('Reproducibility, Intent & Details').setTextInputComponent(reproIntentInput));
+  modal.addLabelComponents(new LabelBuilder().setLabel('Description').setTextInputComponent(descriptionInput));
 
   await interaction.showModal(modal);
 }
@@ -390,9 +375,7 @@ async function handleBugSubmit(interaction: ModalSubmitInteraction) {
 
   const input: BugReportInput = {
     routeIdInput: interaction.fields.getTextInputValue('route_id'),
-    observed: interaction.fields.getTextInputValue('observed'),
-    expected: interaction.fields.getTextInputValue('expected'),
-    reproIntent: interaction.fields.getTextInputValue('reproducibility_intent'),
+    description: interaction.fields.getTextInputValue('description'),
   };
 
   log.info({
@@ -401,9 +384,7 @@ async function handleBugSubmit(interaction: ModalSubmitInteraction) {
     onBehalf: reporterId !== interaction.user.id,
     type: 'bug',
     route: input.routeIdInput,
-    observed: input.observed,
-    expected: input.expected,
-    reproIntent: input.reproIntent,
+    description: input.description,
   }, 'Bug report submitted');
 
   await processBugReport(interaction, input, false, reporterId);
@@ -415,13 +396,9 @@ async function processBugReport(
   force: boolean,
   reporterId: string,
 ): Promise<void> {
-  const { routeIdInput, observed, expected, reproIntent } = input;
+  const { routeIdInput, description } = input;
 
-  const llmContent =
-    `[Observed Behavior]\n${observed}\n\n` +
-    `[Expected Behavior]\n${expected}\n\n` +
-    `[Reproducibility, Intent & Details]\n${reproIntent}`;
-  const titlePromise = titleGenerator.generate('Bug Report', llmContent, observed);
+  const titlePromise = titleGenerator.generate('Bug Report', description, description);
 
   const field = parseRouteField(routeIdInput);
   if (!field) {
@@ -450,7 +427,7 @@ async function processBugReport(
 
   const allRoutes: ExtractedRoute[] = [dedicatedRoute];
   const seenKeys = new Set<string>([(primaryRoute.originalText ?? '').toLowerCase()]);
-  const allText = [observed, expected, reproIntent].join('\n');
+  const allText = description;
   for (const r of [...field.routes.slice(1), ...extractRouteIds(allText)]) {
     const key = (r.originalText ?? '').toLowerCase();
     if (key && !seenKeys.has(key)) {
@@ -501,17 +478,13 @@ async function processBugReport(
   const numberedAdditional = validatedRoutes.slice(1).map((r, i) => ({ ...r, routeNumber: i + 1 }));
 
   const replacementRoutes: ExtractedRoute[] = [dedicatedValidated, ...numberedAdditional];
-  const cleanObserved = replaceRouteIds(observed, replacementRoutes, routeNumberLabel);
-  const cleanExpected = replaceRouteIds(expected, replacementRoutes, routeNumberLabel);
-  const cleanReproIntent = replaceRouteIds(reproIntent, replacementRoutes, routeNumberLabel);
+  const cleanDescription = replaceRouteIds(description, replacementRoutes, routeNumberLabel);
 
   const reportEmbed = new EmbedBuilder()
     .setColor(COLORS.blurple)
     .addFields(
       { name: 'By', value: `<@${reporterId}>`, inline: true },
-      { name: 'Observed Behavior', value: cleanObserved },
-      { name: 'Expected Behavior', value: cleanExpected },
-      { name: 'Reproducibility, Intent & Details', value: cleanReproIntent },
+      { name: 'Description', value: cleanDescription },
     )
     .setTimestamp();
 
@@ -520,7 +493,7 @@ async function processBugReport(
   await submitReport(interaction, {
     embed: reportEmbed,
     title: titlePromise,
-    wikiQuery: `${cleanObserved} ${cleanExpected} ${cleanReproIntent}`,
+    wikiQuery: cleanDescription,
     dedicatedRoute: dedicatedValidated,
     additionalRoutes: numberedAdditional,
     label: 'Bug Report',
